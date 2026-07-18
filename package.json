@@ -1,0 +1,22 @@
+{
+  "name": "rageclickradar",
+  "version": "0.1.0",
+  "description": "Privacy-first, self-hosted user-frustration analytics: rage clicks, dead clicks, form abandonment — no cookies, no PII.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "demo": "node tools/demo.js",
+    "seed": "node tools/generate-sessions.js",
+    "build:tracker": "node tracker/build.js",
+    "test": "node --test test/unit/",
+    "test:e2e": "playwright test --config test/e2e/playwright.config.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "@playwright/test": "^1.61.1"
+  }
+}
