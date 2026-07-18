@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<!--
+  Intentionally frustrating demo page for RageClickRadar.
+  Traps: .plan-card / #plan-basic / #plan-pro / #plan-enterprise (dead clicks —
+         whole card looks selectable but is inert; only the tiny #choose-pro
+         link actually works),
+         #compare-plans (button styled to look disabled but really toggles the
+         hidden #comparison-table).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pricing — CloudNimbus</title>
+    <meta name="description" content="Simple, transparent pricing for teams of every size." />
+    <script src="/radar.js" defer></script>
+    <link rel="stylesheet" href="/demo/demo.css" />
+    <script src="/demo/demo.js" defer></script>
+  </head>
+  <body>
+    <header class="site-nav">
+      <div class="wrap site-nav__inner">
+        <a class="brand" href="/demo/index.html">
+          <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2f6df6" />
+                <stop offset="1" stop-color="#12b6a4" />
+              </linearGradient>
+            </defs>
+            <path
+              fill="url(#g1)"
+              d="M23 13.5a7 7 0 0 0-13.3-2.1A5.5 5.5 0 0 0 10 22h13a4.5 4.5 0 0 0 0-9 4.6 4.6 0 0 0-.5 0Z"
+            />
+          </svg>
+          CloudNimbus
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="/demo/index.html">Product</a>
+          <a href="/demo/pricing.html" class="is-active">Pricing</a>
+          <a href="/demo/signup.html">Sign up</a>
+        </nav>
+        <a class="nav-cta" href="/demo/signup.html">Start free trial</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="pricing-head">
+        <div class="wrap">
+          <span class="eyebrow">Pricing</span>
+          <h1>Plans that grow with your team</h1>
+          <p>
+            Start free and upgrade when you're ready. Every plan includes real-time
+            sync, unlimited devices, and no per-file limits.
+          </p>
+        </div>
+      </section>
+
+      <section class="section" style="padding-top: 20px">
+        <div class="wrap">
+          <div class="plan-grid">
+            <!-- TRAP 4: cards look selectable (pointer + hover lift) but inert. -->
+            <article id="plan-basic" class="plan-card">
+              <div class="plan-card__name">Basic</div>
+              <div class="plan-card__price">$0<span> / month</span></div>
+              <p class="plan-card__desc">For individuals getting organized.</p>
+              <ul class="plan-features">
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  2 GB storage
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Up to 3 collaborators
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Community support
+                </li>
+              </ul>
+            </article>
+
+            <article id="plan-pro" class="plan-card plan-card--featured">
+              <span class="plan-card__badge">Most popular</span>
+              <div class="plan-card__name">Pro</div>
+              <div class="plan-card__price">$12<span> / user / mo</span></div>
+              <p class="plan-card__desc">For growing teams that ship together.</p>
+              <ul class="plan-features">
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  1 TB storage per user
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Unlimited collaborators
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Version history &amp; audit logs
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Priority email support
+                </li>
+              </ul>
+              <!-- The only working control on this card: tiny, low contrast. -->
+              <a id="choose-pro" class="plan-choose" href="/demo/signup.html">select</a>
+            </article>
+
+            <article id="plan-enterprise" class="plan-card">
+              <div class="plan-card__name">Enterprise</div>
+              <div class="plan-card__price">Custom</div>
+              <p class="plan-card__desc">For organizations with advanced needs.</p>
+              <ul class="plan-features">
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Unlimited storage
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  SSO &amp; SCIM provisioning
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Dedicated success manager
+                </li>
+                <li>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  99.99% uptime SLA
+                </li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="pricing-tools">
+            <!-- TRAP 5: looks disabled (gray, low contrast) but actually works. -->
+            <button id="compare-plans" class="btn btn--fauxdisabled" type="button" aria-expanded="false" aria-controls="comparison-table">
+              Compare all features
+            </button>
+          </div>
+
+          <div id="comparison-table" class="comparison" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Feature</th>
+                  <th scope="col">Basic</th>
+                  <th scope="col">Pro</th>
+                  <th scope="col">Enterprise</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Storage</td>
+                  <td>2 GB</td>
+                  <td>1 TB / user</td>
+                  <td>Unlimited</td>
+                </tr>
+                <tr>
+                  <td>Collaborators</td>
+                  <td>3</td>
+                  <td>Unlimited</td>
+                  <td>Unlimited</td>
+                </tr>
+                <tr>
+                  <td>Version history</td>
+                  <td>7 days</td>
+                  <td>1 year</td>
+                  <td>Unlimited</td>
+                </tr>
+                <tr>
+                  <td>SSO &amp; SCIM</td>
+                  <td>—</td>
+                  <td>—</td>
+                  <td>Included</td>
+                </tr>
+                <tr>
+                  <td>Support</td>
+                  <td>Community</td>
+                  <td>Priority email</td>
+                  <td>Dedicated manager</td>
+                </tr>
+                <tr>
+                  <td>Uptime SLA</td>
+                  <td>—</td>
+                  <td>99.9%</td>
+                  <td>99.99%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap site-footer__inner">
+        <span>© 2026 CloudNimbus, Inc. · A demo product, not a real service.</span>
+        <nav aria-label="Footer">
+          <a href="/demo/index.html">Product</a>
+          <a href="/demo/pricing.html">Pricing</a>
+          <a href="/demo/signup.html">Sign up</a>
+        </nav>
+      </div>
+    </footer>
+
+    <div class="radar-badge" data-radar-ignore>
+      🎯 RageClickRadar demo — <a href="/">Open dashboard</a>
+    </div>
+  </body>
+</html>

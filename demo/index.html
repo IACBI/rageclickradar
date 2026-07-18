@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<!--
+  Intentionally frustrating demo page for RageClickRadar.
+  Traps: #hero-banner (dead click, looks clickable but inert),
+         #get-started (rage click, 2s no-feedback delay before navigate),
+         #learn-more-text (dead click, link-styled span that does nothing).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CloudNimbus — Collaborative cloud workspace for modern teams</title>
+    <meta
+      name="description"
+      content="CloudNimbus is the collaborative cloud workspace that keeps your files, docs, and teammates in perfect sync."
+    />
+    <script src="/radar.js" defer></script>
+    <link rel="stylesheet" href="/demo/demo.css" />
+    <script src="/demo/demo.js" defer></script>
+  </head>
+  <body>
+    <header class="site-nav">
+      <div class="wrap site-nav__inner">
+        <a class="brand" href="/demo/index.html">
+          <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2f6df6" />
+                <stop offset="1" stop-color="#12b6a4" />
+              </linearGradient>
+            </defs>
+            <path
+              fill="url(#g1)"
+              d="M23 13.5a7 7 0 0 0-13.3-2.1A5.5 5.5 0 0 0 10 22h13a4.5 4.5 0 0 0 0-9 4.6 4.6 0 0 0-.5 0Z"
+            />
+          </svg>
+          CloudNimbus
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="/demo/index.html" class="is-active">Product</a>
+          <a href="/demo/pricing.html">Pricing</a>
+          <a href="/demo/signup.html">Sign up</a>
+        </nav>
+        <a class="nav-cta" href="/demo/signup.html">Start free trial</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="wrap hero__grid">
+          <div>
+            <span class="eyebrow">New · Real-time sync 2.0</span>
+            <h1>Your team's work, always in sync.</h1>
+            <p class="lead">
+              CloudNimbus keeps every file, document, and conversation together in
+              one calm, fast workspace — so nothing gets lost and no one gets
+              blocked. Set it up in minutes,
+              <span id="learn-more-text" class="pseudo-link">learn more about how sync works</span>,
+              and invite your whole team.
+            </p>
+            <div class="hero__actions">
+              <button id="get-started" class="btn btn--primary" type="button">
+                Get started free
+              </button>
+              <a class="btn btn--ghost" href="/demo/pricing.html">See pricing</a>
+            </div>
+            <p class="hero__note">No credit card required · 2 GB free forever</p>
+          </div>
+
+          <div class="hero__art" aria-hidden="true">
+            <div class="mock-window">
+              <div class="mock-window__bar">
+                <span class="mock-dot"></span>
+                <span class="mock-dot"></span>
+                <span class="mock-dot"></span>
+              </div>
+              <div class="mock-window__body">
+                <div class="mock-row">
+                  <span class="mock-avatar"></span>
+                  <span class="mock-bar mock-bar--60"></span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-avatar"></span>
+                  <span class="mock-bar mock-bar--80"></span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-avatar"></span>
+                  <span class="mock-bar mock-bar--40"></span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-avatar"></span>
+                  <span class="mock-bar mock-bar--60"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wrap">
+          <!-- TRAP 1: styled to look clickable, but has no behavior at all. -->
+          <div id="hero-banner" class="promo-banner" role="presentation">
+            <div class="promo-banner__text">
+              <strong>Summer launch: get 3 months of Pro on us</strong>
+              <span>Limited-time offer for new workspaces — tap to claim</span>
+            </div>
+            <span class="promo-banner__arrow">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M5 12h14M13 6l6 6-6 6"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--soft">
+        <div class="wrap">
+          <div class="section__head">
+            <h2>Everything your team needs, nothing it doesn't</h2>
+            <p>
+              A workspace designed to reduce noise. Fewer tabs, fewer pings, more
+              done.
+            </p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <div class="feature-card__icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3>Smart file sync</h3>
+              <p>
+                Changes propagate the instant they happen. Offline edits merge
+                cleanly the moment you reconnect — no duplicate-file chaos.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-card__icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M4 19a5 5 0 0 1 10 0M16 6a3 3 0 0 1 0 6M20 19a4 4 0 0 0-3-3.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <h3>Live collaboration</h3>
+              <p>
+                See who's editing what in real time. Comment, mention, and resolve
+                without leaving the document you're already in.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-card__icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 3l7 3v5c0 4.4-3 8-7 10-4-2-7-5.6-7-10V6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                  <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h3>Private by default</h3>
+              <p>
+                End-to-end encrypted storage, granular sharing controls, and audit
+                logs so you always know exactly who can see what.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="wrap section__head">
+          <h2>Ready to give your team a calmer workspace?</h2>
+          <p>Join thousands of teams who switched to CloudNimbus this year.</p>
+          <div class="hero__actions" style="justify-content: center">
+            <a class="btn btn--primary" href="/demo/signup.html">Create your workspace</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap site-footer__inner">
+        <span>© 2026 CloudNimbus, Inc. · A demo product, not a real service.</span>
+        <nav aria-label="Footer">
+          <a href="/demo/index.html">Product</a>
+          <a href="/demo/pricing.html">Pricing</a>
+          <a href="/demo/signup.html">Sign up</a>
+        </nav>
+      </div>
+    </footer>
+
+    <div class="radar-badge" data-radar-ignore>
+      🎯 RageClickRadar demo — <a href="/">Open dashboard</a>
+    </div>
+  </body>
+</html>

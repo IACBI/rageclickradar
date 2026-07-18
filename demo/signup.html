@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<!--
+  Intentionally frustrating demo page for RageClickRadar.
+  Traps: #username (hostile field that silently strips vowels while typing →
+         correction churn),
+         #signup-submit (validation always fails the secret "2+ vowels" rule
+         because vowels were stripped; shows NO error, only a 150ms opacity
+         blink → rage clicks + form abandonment).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Create your workspace — CloudNimbus</title>
+    <meta name="description" content="Sign up for CloudNimbus and get your team in sync." />
+    <script src="/radar.js" defer></script>
+    <link rel="stylesheet" href="/demo/demo.css" />
+    <script src="/demo/demo.js" defer></script>
+  </head>
+  <body>
+    <header class="site-nav">
+      <div class="wrap site-nav__inner">
+        <a class="brand" href="/demo/index.html">
+          <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2f6df6" />
+                <stop offset="1" stop-color="#12b6a4" />
+              </linearGradient>
+            </defs>
+            <path
+              fill="url(#g1)"
+              d="M23 13.5a7 7 0 0 0-13.3-2.1A5.5 5.5 0 0 0 10 22h13a4.5 4.5 0 0 0 0-9 4.6 4.6 0 0 0-.5 0Z"
+            />
+          </svg>
+          CloudNimbus
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="/demo/index.html">Product</a>
+          <a href="/demo/pricing.html">Pricing</a>
+          <a href="/demo/signup.html" class="is-active">Sign up</a>
+        </nav>
+        <a class="nav-cta" href="/demo/pricing.html">View pricing</a>
+      </div>
+    </header>
+
+    <main>
+      <div class="auth">
+        <aside class="auth__aside">
+          <h2>Get your team in sync in minutes.</h2>
+          <p>
+            Create a workspace, invite your teammates, and start collaborating on
+            files and docs that stay perfectly up to date.
+          </p>
+          <ul class="auth__points">
+            <li>
+              <span class="tick">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              Free 14-day Pro trial, no card required
+            </li>
+            <li>
+              <span class="tick">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              Unlimited devices and collaborators
+            </li>
+            <li>
+              <span class="tick">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              Cancel anytime, keep your files
+            </li>
+          </ul>
+        </aside>
+
+        <div class="auth__main">
+          <div class="auth__card">
+            <h1>Create your account</h1>
+            <p>Start your free CloudNimbus workspace.</p>
+
+            <form id="signup-form" novalidate>
+              <div class="field">
+                <label for="fullname">Full name</label>
+                <input id="fullname" name="fullname" type="text" autocomplete="name" placeholder="Ada Lovelace" />
+              </div>
+
+              <div class="field">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" autocomplete="off" placeholder="ada" />
+                <p class="field__hint">This will be your workspace URL: cloudnimbus.app/&lt;username&gt;</p>
+              </div>
+
+              <div class="field">
+                <label for="email">Work email</label>
+                <input id="email" name="email" type="email" autocomplete="email" placeholder="ada@company.com" />
+              </div>
+
+              <div class="field">
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+              </div>
+
+              <button id="signup-submit" class="btn btn--primary btn--block auth__submit" type="submit">
+                Create workspace
+              </button>
+            </form>
+
+            <p class="auth__fine">
+              Already have an account? <a href="/demo/index.html">Sign in</a>
+            </p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <div class="radar-badge" data-radar-ignore>
+      🎯 RageClickRadar demo — <a href="/">Open dashboard</a>
+    </div>
+  </body>
+</html>
