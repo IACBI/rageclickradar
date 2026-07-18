@@ -8,291 +8,194 @@
 //
 // Signals are objects { t, ts, x, y, sel, n, m }; x/y/m are included only for
 // the signal types that carry them.
+//
+// Implementation note: written compactly (short internal state names, truthy
+// flags instead of booleans) because this file ships inside the size-budgeted
+// browser bundle. The public API and emitted signals are unchanged and pinned
+// by test/unit/detectors.test.js.
 
 // createDetectors(config, emit) -> handle
 // `config` is the shared CONFIG object (or an override-merged copy). `emit` is
 // called synchronously with each signal.
 export function createDetectors(config, emit) {
-  // ---- Rage state -------------------------------------------------------
-  // A burst is the currently open cluster of clicks. `x`/`y`/`sel` belong to
-  // the FIRST click (radius is measured from it, and that's what we report).
-  let burst = null; // { x, y, sel, n, lastTs, qualified }
-
-  // ---- Dead-click state -------------------------------------------------
-  // Candidates awaiting confirmation that nothing reacted. Each keeps a `burst`
-  // back-reference so a click that turns into a qualifying rage burst can be
-  // suppressed (rage precedence) instead of double-counted as a dead click.
-  let deadCandidates = []; // { ts, x, y, sel, cancelled, burst }
-
-  // ---- Form state -------------------------------------------------------
-  // Keyed by form selector; orphan fields (formSel === null) group under
-  // "(no form)".
+  // Rage: the currently open click cluster. x/y/sel belong to the FIRST click
+  // (radius is measured from it, and that's what we report). `lt` = last click
+  // ts, `q` = qualified (reached RAGE_MIN_CLICKS).
+  let burst;
+  // Dead clicks: candidates awaiting confirmation that nothing reacted.
+  // `gone` = cancelled by a reaction; `b` = back-reference to the click's
+  // burst so a qualifying rage burst suppresses the dead click (precedence).
+  let dead = [];
+  // Forms, keyed by form selector ('(no form)' groups orphan fields). Each:
+  // counts (per-field input counts; its key set = the fields touched), t0
+  // (first input ts), lastSel (last focused field selector), out (focus-left
+  // ts or null), engaged / emitted / isSearch / formFieldCount.
   const forms = new Map();
-  // The selector of the form that currently holds focus (or null when focus is
-  // outside every form / on nothing).
-  let currentFormSel = null;
+  let curForm; // form selector currently holding focus
+  // Correction: one field engagement (focus -> blur), del/ins counters.
+  let ff;
 
-  // ---- Correction state -------------------------------------------------
-  // A single field engagement (focus -> blur). Deletes/inserts are counted per
-  // engagement; refocusing starts a fresh one.
-  let focusedField = null; // { sel, deletes, inserts, ignored }
+  // Read each threshold once (keeps every long config key name to a single
+  // occurrence in the minified bundle).
+  const {
+    RAGE_MIN_CLICKS: MINC,
+    RAGE_MAX_GAP_MS: GAP,
+    RAGE_SETTLE_MS: SETTLE,
+    DEAD_WAIT_MS: WAIT,
+    FORM_MIN_INPUTS: MININ,
+    FORM_BLUR_ABANDON_MS: BLUR,
+    CORRECTION_MIN_DELETES: MIND,
+    CORRECTION_RATIO: RATIO,
+    RAGE_RADIUS_PX: RAD,
+  } = config;
+  const RSQ = RAD * RAD;
+  const key = (s) => (s == null ? '(no form)' : s);
 
-  const RADIUS_SQ = config.RAGE_RADIUS_PX * config.RAGE_RADIUS_PX;
-
-  // ----------------------------------------------------------------------
-  // Rage helpers
-  // ----------------------------------------------------------------------
-  function closeBurst(ts) {
-    if (!burst) return;
-    if (burst.n >= config.RAGE_MIN_CLICKS) {
+  // Emit (if qualified) and discard the open burst.
+  const closeBurst = (ts) => {
+    if (burst && burst.n >= MINC)
       emit({ t: 'rage', ts, x: burst.x, y: burst.y, sel: burst.sel, n: burst.n });
-    }
     burst = null;
-  }
+  };
 
-  function settleRage(ts) {
-    // Close the burst once it has been silent for the settle window.
-    if (burst && ts - burst.lastTs >= config.RAGE_SETTLE_MS) {
-      closeBurst(ts);
+  // Abandon a form unless already emitted, unengaged, or a lone search box.
+  const abandon = (k, f, ts) => {
+    if (f.engaged && !f.emitted && !(f.isSearch && f.formFieldCount <= 1)) {
+      f.emitted = 1;
+      emit({ t: 'formaband', ts, sel: k, n: f.counts.size, m: { last: f.lastSel, dwell: ts - f.t0 } });
     }
-  }
+  };
 
-  // ----------------------------------------------------------------------
-  // Dead-click helpers
-  // ----------------------------------------------------------------------
-  function resolveDead(ts) {
-    if (deadCandidates.length === 0) return;
-    const remaining = [];
-    for (const c of deadCandidates) {
-      if (ts - c.ts >= config.DEAD_WAIT_MS) {
-        // Window elapsed: confirm unless something reacted or the click was
-        // absorbed into a qualifying rage burst.
-        const suppressed = c.cancelled || (c.burst && c.burst.qualified);
-        if (!suppressed) {
-          emit({
-            t: 'dead',
-            ts: c.ts + config.DEAD_WAIT_MS,
-            x: c.x,
-            y: c.y,
-            sel: c.sel,
-            n: 1,
-          });
-        }
-      } else {
-        remaining.push(c);
-      }
-    }
-    deadCandidates = remaining;
-  }
+  // Correction check for a finished field engagement (blur or hide).
+  const evalCorr = (f, ts) => {
+    if (f && !f.ignored && f.del >= MIND && f.del >= RATIO * f.ins)
+      emit({ t: 'correction', ts, sel: f.sel, n: f.del, m: { i: f.ins } });
+  };
 
-  // ----------------------------------------------------------------------
-  // Form helpers
-  // ----------------------------------------------------------------------
-  function formKey(formSel) {
-    return formSel == null ? '(no form)' : formSel;
-  }
-
-  // Move focus between forms, updating each affected form's "focus left at"
-  // timestamp so mid-session blur abandonment can be measured.
-  function setFocusForm(newFormSel, ts) {
-    if (newFormSel === currentFormSel) return;
-    const old = currentFormSel;
-    if (old != null && forms.has(old)) forms.get(old).focusOutsideSince = ts;
-    if (newFormSel != null && forms.has(newFormSel)) {
-      forms.get(newFormSel).focusOutsideSince = null;
-    }
-    currentFormSel = newFormSel;
-  }
-
-  function abandonForm(key, f, ts) {
-    if (f.emitted || !f.engaged) return;
-    // Exemption: a lone search box isn't a form worth abandoning.
-    if (f.isSearch && f.formFieldCount <= 1) return;
-    f.emitted = true;
-    emit({
-      t: 'formaband',
-      ts,
-      sel: key,
-      n: f.fieldsTouched.size,
-      m: { last: f.lastFocusedSel, dwell: ts - f.firstInputTs },
+  // Time advance — runs at the start of every event and from `tick`:
+  // settle rage, resolve matured dead candidates, check blur abandonment.
+  const advance = (ts) => {
+    if (burst && ts - burst.lt >= SETTLE) closeBurst(ts);
+    dead = dead.filter((c) => {
+      if (ts - c.ts < WAIT) return 1;
+      // Window elapsed: confirm unless something reacted or the click was
+      // absorbed into a qualifying rage burst.
+      if (!c.gone && !(c.b && c.b.q))
+        emit({ t: 'dead', ts: c.ts + WAIT, x: c.x, y: c.y, sel: c.sel, n: 1 });
     });
-  }
+    for (const [k, f] of forms) if (f.out != null && ts - f.out > BLUR) abandon(k, f, ts);
+  };
 
-  function checkFormBlurAbandon(ts) {
-    for (const [key, f] of forms) {
-      if (
-        f.engaged &&
-        !f.emitted &&
-        f.focusOutsideSince != null &&
-        ts - f.focusOutsideSince > config.FORM_BLUR_ABANDON_MS
-      ) {
-        abandonForm(key, f, ts);
-      }
+  // Move focus between forms, stamping each affected form's "focus left" ts.
+  const setFocus = (k, ts) => {
+    if (k != curForm) {
+      const a = forms.get(curForm);
+      if (a) a.out = ts;
+      const b = forms.get(k);
+      if (b) b.out = null;
+      curForm = k;
     }
-  }
+  };
 
-  // ----------------------------------------------------------------------
-  // Correction helpers
-  // ----------------------------------------------------------------------
-  function evaluateCorrection(ff, ts) {
-    if (!ff || ff.ignored) return;
-    const d = ff.deletes;
-    const i = ff.inserts;
-    if (d >= config.CORRECTION_MIN_DELETES && d >= config.CORRECTION_RATIO * i) {
-      emit({ t: 'correction', ts, sel: ff.sel, n: d, m: { i } });
-    }
-  }
+  // Shared body for onSubmit / onFormRemoved: drop the form's state.
+  const clear = ({ ts, formSel }) => {
+    advance(ts);
+    forms.delete(key(formSel));
+  };
 
-  // ----------------------------------------------------------------------
-  // Time advance — run at the start of every event and by `tick`.
-  // ----------------------------------------------------------------------
-  function advance(ts) {
-    settleRage(ts);
-    resolveDead(ts);
-    checkFormBlurAbandon(ts);
-  }
-
-  // ----------------------------------------------------------------------
-  // Public handle
-  // ----------------------------------------------------------------------
   return {
-    onClick({ ts, x, y, target }) {
+    onClick({ ts, x, y, target: g }) {
       advance(ts);
-
-      // --- Rage ---
-      let burstForThisClick = null;
-      const rageEligible = !(target.allowRapid || target.isCanvas || target.ignored);
-      if (rageEligible) {
-        if (burst) {
-          const gap = ts - burst.lastTs;
-          const dx = x - burst.x;
-          const dy = y - burst.y;
-          const withinBurst =
-            gap <= config.RAGE_MAX_GAP_MS && dx * dx + dy * dy <= RADIUS_SQ;
-          if (withinBurst) {
-            burst.n++;
-            burst.lastTs = ts;
-          } else {
-            closeBurst(ts); // emit the previous burst if it qualified
-            burst = { x, y, sel: target.sel, n: 1, lastTs: ts, qualified: false };
-          }
+      let b = null;
+      if (!(g.allowRapid || g.isCanvas || g.ignored)) {
+        if (burst && ts - burst.lt <= GAP && (x - burst.x) ** 2 + (y - burst.y) ** 2 <= RSQ) {
+          burst.n++;
+          burst.lt = ts;
         } else {
-          burst = { x, y, sel: target.sel, n: 1, lastTs: ts, qualified: false };
+          closeBurst(ts); // emit the previous burst if it qualified
+          burst = { x, y, sel: g.sel, n: 1, lt: ts };
         }
-        if (burst.n >= config.RAGE_MIN_CLICKS) burst.qualified = true;
-        burstForThisClick = burst;
+        if (burst.n >= MINC) burst.q = 1;
+        b = burst;
       }
-
-      // --- Dead ---
-      const deadEligible =
-        !target.interactive &&
-        !target.isBodyOrHtml &&
-        !target.ignored &&
-        !target.dragged;
-      if (deadEligible) {
-        deadCandidates.push({
-          ts,
-          x,
-          y,
-          sel: target.sel,
-          cancelled: false,
-          burst: burstForThisClick,
-        });
-      }
+      if (!(g.interactive || g.isBodyOrHtml || g.ignored || g.dragged))
+        dead.push({ ts, x, y, sel: g.sel, b });
     },
 
     onReaction(ts) {
-      // Cancel any dead candidate whose wait window covers this reaction,
-      // BEFORE resolving matured candidates (a boundary reaction wins).
-      for (const c of deadCandidates) {
-        if (ts >= c.ts && ts <= c.ts + config.DEAD_WAIT_MS) c.cancelled = true;
-      }
+      // Cancel candidates whose wait window covers this reaction BEFORE
+      // resolving matured ones (a boundary reaction wins).
+      for (const c of dead) if (ts >= c.ts && ts <= c.ts + WAIT) c.gone = 1;
       advance(ts);
     },
 
     onFieldFocus({ ts, field }) {
       advance(ts);
-      setFocusForm(formKey(field.formSel), ts);
-      const f = forms.get(formKey(field.formSel));
-      if (f) f.lastFocusedSel = field.sel;
-      // Start a fresh correction engagement for this field.
-      focusedField = { sel: field.sel, deletes: 0, inserts: 0, ignored: !!field.ignored };
+      const k = key(field.formSel);
+      setFocus(k, ts);
+      const f = forms.get(k);
+      if (f) f.lastSel = field.sel;
+      // Fresh correction engagement for this field.
+      ff = { sel: field.sel, del: 0, ins: 0, ignored: field.ignored };
     },
 
     onFieldBlur({ ts, field }) {
       advance(ts);
       // Correction evaluates on blur of the engaged field.
-      if (focusedField && focusedField.sel === field.sel) {
-        evaluateCorrection(focusedField, ts);
-        focusedField = null;
+      if (ff && ff.sel == field.sel) {
+        evalCorr(ff, ts);
+        ff = null;
       }
-      setFocusForm(null, ts);
+      setFocus(null, ts);
     },
 
     onFieldInput({ ts, field, kind }) {
       advance(ts);
       if (field.ignored) return; // ignored fields drive nothing
-
-      // Form engagement bookkeeping.
-      const key = formKey(field.formSel);
-      let f = forms.get(key);
-      if (!f) {
-        f = {
-          engaged: false,
-          fieldsTouched: new Set(),
-          fieldInputCounts: new Map(),
-          firstInputTs: null,
-          lastFocusedSel: currentFormSel === key && focusedField ? focusedField.sel : null,
-          emitted: false,
-          isSearch: !!field.isSearch,
-          formFieldCount: field.formFieldCount,
-          // If focus is already inside this form, it isn't "outside".
-          focusOutsideSince: currentFormSel === key ? null : ts,
-        };
-        forms.set(key, f);
-      }
-      f.isSearch = !!field.isSearch;
+      const k = key(field.formSel);
+      const inside = curForm === k; // focus already inside => not "outside"
+      let f = forms.get(k);
+      if (!f)
+        forms.set(
+          k,
+          (f = {
+            counts: new Map(),
+            t0: ts,
+            lastSel: inside && ff ? ff.sel : null,
+            out: inside ? null : ts,
+          }),
+        );
+      f.isSearch = field.isSearch;
       f.formFieldCount = field.formFieldCount;
-      f.fieldsTouched.add(field.sel);
-      if (f.lastFocusedSel == null) f.lastFocusedSel = field.sel;
-      const count = (f.fieldInputCounts.get(field.sel) || 0) + 1;
-      f.fieldInputCounts.set(field.sel, count);
-      if (f.firstInputTs == null) f.firstInputTs = ts;
-      if (count >= config.FORM_MIN_INPUTS) f.engaged = true;
-
-      // Correction bookkeeping for the focused field.
-      if (focusedField && focusedField.sel === field.sel) {
-        if (kind === 'delete') focusedField.deletes++;
-        else if (kind === 'insert') focusedField.inserts++;
+      if (f.lastSel == null) f.lastSel = field.sel;
+      const c = (f.counts.get(field.sel) || 0) + 1;
+      f.counts.set(field.sel, c);
+      if (c >= MININ) f.engaged = 1;
+      if (ff && ff.sel == field.sel) {
+        if (kind == 'delete') ff.del++;
+        else if (kind == 'insert') ff.ins++;
       }
     },
 
-    onSubmit({ ts, formSel }) {
-      advance(ts);
-      forms.delete(formKey(formSel)); // cleared: no abandonment for this form
-    },
+    // Submit (cleared, no abandonment) and removal (neutral discard) both
+    // just drop the form's state.
+    onSubmit: clear,
+    onFormRemoved: clear,
 
-    onFormRemoved({ ts, formSel }) {
-      advance(ts);
-      forms.delete(formKey(formSel)); // neutral: discard, no signal
-    },
-
-    tick(ts) {
-      advance(ts);
-    },
+    tick: advance,
 
     onHide(ts) {
       advance(ts);
       // Flush a still-open rage burst regardless of the settle window.
       closeBurst(ts);
-      // Dead candidates whose window hasn't elapsed can't be confirmed here
-      // (advance already emitted the matured ones); discard the rest.
-      deadCandidates = [];
+      // Unexpired dead candidates can't be confirmed here; discard the rest
+      // (advance already emitted the matured ones).
+      dead = [];
       // Correction for the still-focused field.
-      evaluateCorrection(focusedField, ts);
-      focusedField = null;
+      evalCorr(ff, ts);
+      ff = null;
       // Abandon every engaged, uncleared, non-exempt form.
-      for (const [key, f] of forms) abandonForm(key, f, ts);
+      for (const [k, f] of forms) abandon(k, f, ts);
     },
   };
 }
