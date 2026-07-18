@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { handleCollectBody } from './collect.js';
+import { registerReadRoutes } from './queries.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -216,6 +217,9 @@ async function collectHandler(req, res, ctx) {
 }
 
 registerRoute('POST', '/api/collect', collectHandler);
+
+// Read/aggregation endpoints (pages, heatmap, hotspots, sessions).
+registerReadRoutes(registerRoute);
 
 // --- Request dispatch -----------------------------------------------------
 function handleApi(req, res, ctx, pathname) {
