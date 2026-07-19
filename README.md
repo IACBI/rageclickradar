@@ -60,9 +60,13 @@ your collector explicitly with `data-endpoint`:
 ```
 
 That is the entire install. Add `data-radar-ignore` to any element (or an
-ancestor) to exclude it from tracking. Within a minute of real traffic the
-dashboard at `/` starts showing per-page confusion scores, click heatmaps,
-selector-level hotspots, and individual anonymous session timelines.
+ancestor) to exclude it from tracking. Add `data-radar-allow-rapid` to any
+element (or an ancestor) to suppress rage-click detection there — for controls
+where repeated clicking is expected. The tracker already auto-exempts rapid
+clicking on `input[type=number]`, `[role=spinbutton]`, `[role=slider]`, and any
+element whose class contains `stepper`, `carousel`, or `qty`. Within a minute of
+real traffic the dashboard at `/` starts showing per-page confusion scores, click
+heatmaps, selector-level hotspots, and individual anonymous session timelines.
 
 ## Signals
 
@@ -74,7 +78,7 @@ at runtime (see [Configuration](#configuration)).
 | --- | --- | --- | --- |
 | **Rage click** | User clicks the same spot repeatedly in frustration. | ≥ 3 clicks, each within 500 ms of the last, all within a 30 px radius; the burst is emitted 700 ms after the last click. | `RAGE_MIN_CLICKS`, `RAGE_MAX_GAP_MS`, `RAGE_RADIUS_PX`, `RAGE_SETTLE_MS` |
 | **Dead click** | User clicks something that looks clickable but isn't. | A non-interactive target (no link/button/role, no `cursor: pointer`) with no DOM mutation, scroll, text selection, or URL change within 600 ms. | `DEAD_WAIT_MS`, `DEAD_MAX_ANCESTORS`, `DEAD_SCROLL_PX`, `DEAD_DRAG_PX` |
-| **Form abandonment** | User engages a form, then leaves without submitting. | A field received ≥ 3 input events and the form was never submitted; fires on page-hide, or after 30 s of focus elsewhere. | `FORM_MIN_INPUTS`, `FORM_BLUR_ABANDON_MS` |
+| **Form abandonment** | User engages a form, then leaves without submitting. | A field received ≥ 3 input events and the form was never submitted; fires on page-hide, or after 30 s of focus elsewhere. A standalone search field (a lone search input, ≤ 1 field) never fires it. | `FORM_MIN_INPUTS`, `FORM_BLUR_ABANDON_MS` |
 | **Correction** | User fights a field, deleting and retyping heavily. | In one field engagement: ≥ 8 deletions **and** deletions ≥ 0.5 × insertions (counted from input-event types only — the text is never read). | `CORRECTION_MIN_DELETES`, `CORRECTION_RATIO` |
 
 Each page's **confusion score** is the sum of its signal rows weighted by type:
@@ -217,10 +221,9 @@ npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
 
-> **Note (Windows):** `npm test` runs `node --test test/unit/`. On Windows the
-> Node test runner does not expand a directory argument reliably; if `npm test`
-> reports a single failing `test\unit` entry, run the glob form instead:
-> `node --test test/unit/*.test.js`.
+> **Note:** The `test` script uses the glob form (`node --test test/unit/*.test.js`)
+> because `node --test <directory>` does not expand a directory argument reliably
+> on Windows.
 
 The seeder POSTs synthetic sessions through the real `/api/collect` endpoint, so
 the server must be running first. A fixed `--seed` makes generation fully

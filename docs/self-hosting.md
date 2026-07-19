@@ -38,6 +38,12 @@ Run on a different port and database path:
 PORT=9000 DB_PATH=/var/lib/rageclickradar/radar.db npm start
 ```
 
+On Windows PowerShell, set the variables first:
+
+```powershell
+$env:PORT='9000'; $env:DB_PATH='C:\rageclickradar\radar.db'; npm start
+```
+
 The database is opened in WAL mode, so you will see `radar.db`, `radar.db-wal`,
 and `radar.db-shm` files next to each other in normal operation.
 
@@ -111,10 +117,12 @@ server {
 ```
 
 The collector never stores the client IP, but the in-memory rate limiter keys on
-the socket's remote address. Behind a proxy that address is the proxy itself, so
-all collect traffic shares one bucket. If you rate-limit at the proxy layer
-instead (recommended behind a proxy), that is where per-client limiting should
-live.
+the raw socket's remote address — it deliberately ignores `X-Forwarded-For` so a
+client cannot spoof its way into a fresh bucket. Behind a reverse proxy that
+socket address is the proxy itself, so **all** clients share one bucket (per
+budget). Either expose the collector directly, raise the limits to suit your
+traffic, or rate-limit per client at the proxy layer instead (recommended behind
+a proxy).
 
 ## CORS note
 
@@ -127,6 +135,26 @@ default, in-memory). None of the read/aggregation endpoints (`/api/pages`,
 `/api/heatmap`, ...) send CORS headers, so browsers on other origins cannot read
 your data. Keep the dashboard itself private (proxy auth, VPN, or an allow-list)
 since the MVP has no built-in authentication.
+
+## API limits
+
+Two independent per-IP rate limits protect the process, both in-memory and keyed
+on the raw socket address (see the reverse-proxy caveat above):
+
+| Endpoint(s) | Limit | Where |
+| --- | --- | --- |
+| `/api/collect` (write) | 60 req/min | `RATE_LIMIT_PER_MIN` (`shared/config.js`) |
+| `/api/pages`, `/api/heatmap`, `/api/hotspots`, `/api/sessions`, `/api/session` (read) | 300 req/min | `READ_RATE_LIMIT_PER_MIN` (`server/http.js`) |
+
+The read endpoints also cap result size to bound response size and query cost on
+busy pages (constants in `server/queries.js`). Rows are ordered *before* the cap,
+so each response keeps the top-N under its ordering:
+
+| Endpoint | Cap | Ordering kept |
+| --- | --- | --- |
+| `/api/pages` | 200 pages | Highest confusion score first. |
+| `/api/heatmap` | 20,000 points | Oldest events first (by insert id). |
+| `/api/session` | 5,000 events | Earliest events first (by `ts`). |
 
 ## Backups
 
@@ -150,8 +178,11 @@ The database is a single SQLite file. Because WAL mode keeps recent writes in th
 
 ## Data retention
 
-`received_at` is a server-side wall-clock timestamp in milliseconds (the only
-wall-clock value stored). Delete events older than a cutoff and reclaim space:
+The server stamps three wall-clock timestamps in milliseconds (all `Date.now()`,
+none sent by the browser): `events.received_at` (arrival time, drives retention),
+plus `sessions.started_at` and `sessions.last_seen` (set on first insert and
+updated on every subsequent batch — they order the session list and let you prune
+stale sessions). Delete events older than a cutoff and reclaim space:
 
 ```sql
 -- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).

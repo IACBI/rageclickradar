@@ -38,9 +38,14 @@ anything else in a payload is dropped on the server before storage.
 | `n` | `5` | Signal magnitude: clicks in a rage burst, deletions in a correction, engaged fields in an abandonment. |
 | `m` | `{ "i": 14 }` | Tiny type-specific meta (e.g. insertion count, last-field selector, dwell ms). Capped at 500 chars, structure only — no text values. |
 
-The server also records one field the browser never sends: `received_at`, a
-server-side wall-clock timestamp used solely for retention. It is not tied to any
-identity.
+The server also records three wall-clock timestamps the browser never sends (all
+`Date.now()`, in milliseconds). None is tied to any identity:
+
+| Field | Where | Why it exists |
+| --- | --- | --- |
+| `received_at` | on each event | Arrival time; drives retention (delete rows older than a cutoff). |
+| `started_at` | on the session | When the session's first batch arrived. |
+| `last_seen` | on the session | Updated on every batch; orders the session list newest-first and lets you prune stale sessions. |
 
 ## What is NOT collected
 
@@ -122,5 +127,4 @@ Everything here is checkable in the source:
   `event.inputType` is classified — `event.data` and `element.value` are never
   touched.
 
-Run the tests yourself with `npm test` (on Windows,
-`node --test test/unit/*.test.js`).
+Run the tests yourself with `npm test`.
