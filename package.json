@@ -12,7 +12,7 @@
     "demo": "node tools/demo.js",
     "seed": "node tools/generate-sessions.js",
     "build:tracker": "node tracker/build.js",
-    "test": "node --test test/unit/",
+    "test": "node --test test/unit/*.test.js",
     "test:e2e": "playwright test --config test/e2e/playwright.config.js"
   },
   "devDependencies": {
