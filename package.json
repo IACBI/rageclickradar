@@ -4,6 +4,27 @@
   "description": "Privacy-first, self-hosted user-frustration analytics: rage clicks, dead clicks, form abandonment — no cookies, no PII.",
   "type": "module",
   "license": "MIT",
+  "author": "RageClickRadar contributors",
+  "homepage": "https://github.com/IACBI/rageclickradar#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IACBI/rageclickradar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/IACBI/rageclickradar/issues"
+  },
+  "keywords": [
+    "analytics",
+    "ux",
+    "rage-click",
+    "dead-click",
+    "heatmap",
+    "session-replay-alternative",
+    "privacy",
+    "self-hosted",
+    "sqlite",
+    "frustration-analytics"
+  ],
   "engines": {
     "node": ">=22.5"
   },

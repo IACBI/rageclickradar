@@ -1,5 +1,10 @@
 # RageClickRadar
 
+[![CI](https://github.com/IACBI/rageclickradar/actions/workflows/ci.yml/badge.svg)](https://github.com/IACBI/rageclickradar/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg)](docs/self-hosting.md)
+[![Tracker size](https://img.shields.io/badge/tracker-%E2%89%A45%20KB-brightgreen.svg)](tracker/build.js)
+
 **Frustration analytics without the surveillance.** A privacy-first, self-hosted
 alternative to Hotjar-style tools: it finds the buttons that do nothing, the
 forms people give up on, and the spots where users angrily click over and over —
@@ -30,8 +35,8 @@ You need **Node 22.5 or newer** (Node 24 LTS recommended — see
 [docs/self-hosting.md](docs/self-hosting.md) for the version matrix). Then:
 
 ```bash
-git clone https://github.com/your-org/RageClickRadar.git
-cd RageClickRadar
+git clone https://github.com/IACBI/rageclickradar.git
+cd rageclickradar
 npm install && npm run demo
 ```
 
@@ -229,6 +234,17 @@ The seeder POSTs synthetic sessions through the real `/api/collect` endpoint, so
 the server must be running first. A fixed `--seed` makes generation fully
 deterministic; `--verify` asserts the seeded corpus is demo-ready via the read
 endpoints.
+
+## Contributing
+
+Contributions are welcome — bug fixes, docs, tests, and well-scoped features.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, how to run the
+tests, and the hard rules that keep the project honest (the 5 KB tracker budget,
+zero server runtime dependencies, and the privacy invariants). Please also read
+our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security issue? Please report it privately — see
+[SECURITY.md](SECURITY.md).
 
 ## License
 
