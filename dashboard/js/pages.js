@@ -58,11 +58,11 @@ function pageDetailHash(page) {
 }
 
 // One colored count chip per signal type that has activity.
-function signalChips(counts, { showZero = false } = {}) {
+function signalChips(counts) {
   const wrap = h('span', { class: 'chips' });
   for (const sig of SIGNALS) {
     const n = (counts && counts[sig.key]) || 0;
-    if (n === 0 && !showZero) continue;
+    if (n === 0) continue;
     wrap.appendChild(
       h(
         'span',
@@ -148,7 +148,9 @@ function emptyState() {
 // --- Pages ranking view ---------------------------------------------------
 
 function pagesTable(pages) {
-  const maxScore = Math.max(...pages.map((p) => p.score), 1);
+  // reduce, not Math.max(...spread): a large pages array would overflow the
+  // call-stack argument limit and throw RangeError.
+  const maxScore = pages.reduce((m, p) => Math.max(m, p.score), 1);
 
   const head = h(
     'tr',
@@ -250,7 +252,8 @@ function hotspotsList(hotspots) {
       'No element-level hotspots recorded for this page yet.',
     );
   }
-  const maxScore = Math.max(...hotspots.map((hs) => hs.score), 1);
+  // reduce, not Math.max(...spread): guards against RangeError on huge arrays.
+  const maxScore = hotspots.reduce((m, hs) => Math.max(m, hs.score), 1);
   const list = h('ol', { class: 'hotspots' });
   for (const [i, hs] of hotspots.entries()) {
     const pct = Math.max(4, Math.round((hs.score / maxScore) * 100));

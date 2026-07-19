@@ -11,7 +11,6 @@
 // `export default function mount(el, params)` where `el` is the view mount
 // element (cleared by the router before the call) and `params` is a plain
 // object of decoded query params plus `route` (e.g. 'sessions' | 'session').
-// Until those modules exist, their routes render a neutral placeholder.
 
 import { renderPagesList, renderPageDetail } from './pages.js';
 
@@ -51,17 +50,16 @@ function renderMessage(title, body) {
   view.appendChild(card);
 }
 
-// Route to a lazily loaded module; a missing module (not shipped yet) renders
-// a neutral placeholder instead of surfacing an error.
+// Route to a lazily loaded view module. Both target modules ship with the
+// dashboard, so a rejected import is a genuine load failure — surface a plain
+// error and log the underlying cause rather than a "coming soon" placeholder.
 async function mountLazy(modulePath, route, params) {
   let mod;
   try {
     mod = await loadModule(modulePath);
-  } catch {
-    renderMessage(
-      "This view isn't available yet.",
-      'It ships in an upcoming build of the dashboard.',
-    );
+  } catch (err) {
+    console.error(`Failed to load view module ${modulePath}:`, err);
+    renderMessage('Failed to load this view.');
     return;
   }
   view.replaceChildren();

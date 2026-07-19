@@ -38,7 +38,23 @@ const BANDS = {
 
 const IFRAME_TIMEOUT_MS = 3000;
 
+// Cap the offscreen heat buffer's area so the per-pixel colorize loop stays
+// cheap even when a captured document is tens of thousands of px tall.
+const MAX_HEAT_AREA = 4_000_000;
+
 // --- Small helpers ---------------------------------------------------------
+
+// Only a same-origin relative path is safe to use as the live-preview iframe
+// src. The page comes straight from the URL hash, so a crafted route like
+// #/heatmap?page=javascript:... must not become the frame's src. Require a
+// leading '/', reject protocol-relative '//host', and reject any scheme.
+function isEmbeddablePath(page) {
+  const s = String(page || '');
+  if (!s.startsWith('/')) return false;
+  if (s.startsWith('//')) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) return false;
+  return true;
+}
 
 function h(tag, attrs, ...children) {
   const node = document.createElement(tag);
@@ -249,20 +265,29 @@ function drawHeat(canvas, w, hgt, points, activeType) {
   ctx.clearRect(0, 0, w, hgt);
   if (!points.length) return;
 
+  // Render the heat field into a downscaled buffer: a full-document canvas can
+  // be tens of thousands of px tall, and both the radial fills and the
+  // per-pixel colorize loop run on the main thread. Cap the buffer area, then
+  // scale up when compositing — heat is soft, so the upscale is visually
+  // indistinguishable. When the canvas is already under budget, scale is 1.
+  const scale = Math.min(1, Math.sqrt(MAX_HEAT_AREA / (w * hgt)));
+  const ow = Math.max(1, Math.round(w * scale));
+  const oh = Math.max(1, Math.round(hgt * scale));
+
   // Accumulate intensity into the alpha channel of an offscreen buffer.
   const off = document.createElement('canvas');
-  off.width = w;
-  off.height = hgt;
+  off.width = ow;
+  off.height = oh;
   const octx = off.getContext('2d');
   octx.globalCompositeOperation = 'lighter';
   for (const p of points) {
     if (typeof p.x !== 'number' || typeof p.y !== 'number') continue;
-    const sx = w / (p.docW || w);
-    const sy = hgt / (p.docH || hgt);
+    const sx = ow / (p.docW || w);
+    const sy = oh / (p.docH || hgt);
     const px = p.x * sx;
     const py = p.y * sy;
     const n = Math.min(p.n || 1, 8);
-    const radius = 18 + 4 * n;
+    const radius = (18 + 4 * n) * scale;
     const centerA = Math.min(0.7, 0.22 + 0.05 * n);
     const grad = octx.createRadialGradient(px, py, 0, px, py, radius);
     grad.addColorStop(0, `rgba(0,0,0,${centerA})`);
@@ -275,7 +300,7 @@ function drawHeat(canvas, w, hgt, points, activeType) {
 
   // Colorize: map accumulated intensity (alpha) through the LUT. The per-pixel
   // alpha is capped so dense clusters saturate to color instead of whiting out.
-  const img = octx.getImageData(0, 0, w, hgt);
+  const img = octx.getImageData(0, 0, ow, oh);
   const d = img.data;
   const lut = buildLut(activeType);
   for (let i = 0; i < d.length; i += 4) {
@@ -287,7 +312,11 @@ function drawHeat(canvas, w, hgt, points, activeType) {
     d[i + 2] = lut[o + 2];
     d[i + 3] = Math.round(lut[o + 3] * 0.82);
   }
-  ctx.putImageData(img, 0, 0);
+  octx.putImageData(img, 0, 0);
+
+  // Composite the low-res heat layer up to full canvas size with smoothing.
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(off, 0, 0, ow, oh, 0, 0, w, hgt);
 }
 
 // --- View mount ------------------------------------------------------------
@@ -622,6 +651,12 @@ export default async function mount(el, params) {
     }
 
     const dims = dominantDims(points);
+    // Only embed same-origin relative paths; anything else (scheme, host)
+    // renders through the wireframe fallback instead of an iframe src.
+    if (!isEmbeddablePath(page)) {
+      fallback(points, "This page can't be embedded — showing an abstract layout.");
+      return;
+    }
     await renderStage(points, dims, myToken);
   }
 
