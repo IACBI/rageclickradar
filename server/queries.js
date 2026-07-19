@@ -16,6 +16,11 @@ const TYPES = Object.freeze(['rage', 'dead', 'formaband', 'correction']);
 const VALID_TYPES = new Set(TYPES);
 const MAX_SESSIONS_LIMIT = 200;
 const DEFAULT_SESSIONS_LIMIT = 50;
+// Hard result caps that bound response size and query cost on busy pages.
+// Rows are ordered before the cap, so each keeps the top-N under its ordering.
+const PAGES_LIMIT = 200;
+const HEATMAP_POINTS_LIMIT = 20000;
+const SESSION_EVENTS_LIMIT = 5000;
 
 /**
  * Error carrying an HTTP status for invalid input (400) or missing resources
@@ -106,7 +111,9 @@ export function getPages(db) {
     entry.score += (WEIGHTS[row.type] || 0) * row.cnt;
   }
 
-  return [...byPage.values()].sort((a, b) => b.score - a.score);
+  // Merged in JS from two GROUP BY scans, so the cap is applied to the final
+  // score-sorted array to keep the top PAGES_LIMIT pages.
+  return [...byPage.values()].sort((a, b) => b.score - a.score).slice(0, PAGES_LIMIT);
 }
 
 /**
@@ -143,7 +150,8 @@ export function getHeatmap(db, params) {
         'FROM events e JOIN sessions s ON s.id = e.session_id ' +
         'WHERE ' +
         clauses.join(' AND ') +
-        ' ORDER BY e.id ASC',
+        ' ORDER BY e.id ASC' +
+        ` LIMIT ${HEATMAP_POINTS_LIMIT}`,
     )
     .all(...args);
 
@@ -293,7 +301,8 @@ export function getSessionDetail(db, id) {
   const rows = db
     .prepare(
       'SELECT page, type, ts, x, y, selector, count AS n, meta ' +
-        'FROM events WHERE session_id = ? ORDER BY ts ASC',
+        'FROM events WHERE session_id = ? ORDER BY ts ASC' +
+        ` LIMIT ${SESSION_EVENTS_LIMIT}`,
     )
     .all(id);
 

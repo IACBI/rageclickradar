@@ -311,3 +311,62 @@ test('session detail: unknown id throws QueryError 404', () => {
     (err) => err instanceof QueryError && err.status === 404,
   );
 });
+
+// --- Result caps ----------------------------------------------------------
+
+test('pages: result list is capped at 200 pages, keeping the top scores', () => {
+  const db = freshDb();
+  const insS = db.prepare(
+    'INSERT INTO sessions (id, started_at, last_seen, vw, vh) VALUES (?, ?, ?, ?, ?)',
+  );
+  insS.run('s_cap00000pages', 1, 1, 800, 600);
+  const insE = db.prepare(
+    `INSERT INTO events
+       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  // 250 distinct pages, one rage row each -> all score 3; only 200 survive.
+  for (let i = 0; i < 250; i++) {
+    insE.run('s_cap00000pages', `/p${i}`, 'rage', i, 1, 1, 800, 600, '#x', 1, null, 1);
+  }
+  const pages = getPages(db);
+  assert.equal(pages.length, 200);
+});
+
+test('heatmap: point list is capped at 20000', () => {
+  const db = freshDb();
+  db.prepare(
+    "INSERT INTO sessions (id, started_at, last_seen, vw, vh) VALUES ('s_cap0000heat', 1, 1, 800, 600)",
+  ).run();
+  const insE = db.prepare(
+    `INSERT INTO events
+       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.exec('BEGIN');
+  for (let i = 0; i < 20050; i++) {
+    insE.run('s_cap0000heat', '/hot', 'rage', i, 1, 1, 800, 600, '#x', 1, null, 1);
+  }
+  db.exec('COMMIT');
+  const { points } = getHeatmap(db, { page: '/hot' });
+  assert.equal(points.length, 20000);
+});
+
+test('session detail: event list is capped at 5000', () => {
+  const db = freshDb();
+  db.prepare(
+    "INSERT INTO sessions (id, started_at, last_seen, vw, vh) VALUES ('s_cap0000sess', 1, 1, 800, 600)",
+  ).run();
+  const insE = db.prepare(
+    `INSERT INTO events
+       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.exec('BEGIN');
+  for (let i = 0; i < 5050; i++) {
+    insE.run('s_cap0000sess', '/p', 'dead', i, null, null, 800, 600, null, 1, null, 1);
+  }
+  db.exec('COMMIT');
+  const detail = getSessionDetail(db, 's_cap0000sess');
+  assert.equal(detail.events.length, 5000);
+});

@@ -13,6 +13,32 @@ const DIM_MAX = 100000;
 const META_MAX_LEN = 500;
 const N_MAX = 10000;
 
+// Prepared statements are expensive to build, so cache them per db instead of
+// re-preparing on every request. A WeakMap keys the cache on the db handle so
+// fresh in-memory DBs (used by the tests) each get their own set and drop out
+// of the cache when the handle is collected.
+const stmtCache = new WeakMap();
+
+function statementsFor(db) {
+  let stmts = stmtCache.get(db);
+  if (!stmts) {
+    stmts = {
+      upsertSession: db.prepare(
+        `INSERT INTO sessions (id, started_at, last_seen, vw, vh)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
+      ),
+      insertEvent: db.prepare(
+        `INSERT INTO events
+           (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ),
+    };
+    stmtCache.set(db, stmts);
+  }
+  return stmts;
+}
+
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
 }
@@ -139,19 +165,10 @@ export function handleCollectBody(db, rawBody) {
 
   const now = Date.now();
 
-  const upsertSession = db.prepare(
-    `INSERT INTO sessions (id, started_at, last_seen, vw, vh)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
-  );
-  const insertEvent = db.prepare(
-    `INSERT INTO events
-       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
+  const { upsertSession, insertEvent } = statementsFor(db);
 
-  db.exec('BEGIN');
   try {
+    db.exec('BEGIN');
     upsertSession.run(payload.sid, now, now, vw, vh);
     for (const r of rows) {
       insertEvent.run(
@@ -171,7 +188,13 @@ export function handleCollectBody(db, rawBody) {
     }
     db.exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    // Roll back defensively; a failed rollback must not mask the original
+    // storage error or escape as an unhandled throw.
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore — the 500 below still reports the original failure
+    }
     return { status: 500, body: { error: 'storage failure' } };
   }
 

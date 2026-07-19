@@ -22,6 +22,10 @@ const COLLECT_CORS = Object.freeze({
   'Access-Control-Allow-Headers': 'content-type',
 });
 
+// Read API endpoints get their own, more generous per-IP budget than the
+// write path (/api/collect, whose limit comes from config.RATE_LIMIT_PER_MIN).
+const READ_RATE_LIMIT_PER_MIN = 300;
+
 // --- Route table ----------------------------------------------------------
 // Keyed by pathname -> { METHOD: handler }. A handler is (req, res, ctx).
 // Adding a read endpoint later is a single registerRoute() call.
@@ -95,18 +99,27 @@ function readBody(req, maxBytes) {
   });
 }
 
-// In-memory token-bucket rate limiter. IPs live only in this map, are never
-// logged or persisted, and stale entries are pruned.
-function createRateLimiter(limitPerMin) {
+// In-memory token-bucket rate limiter with independent named budgets (e.g.
+// 'collect' vs. 'read') sharing one bucket map and one prune loop. IPs live
+// only in this map, are never logged or persisted, and stale entries are
+// pruned. `limits` maps bucket name -> per-minute allowance.
+function createRateLimiter(limits) {
   const WINDOW_MS = 60000;
   const buckets = new Map();
 
-  function allow(ip) {
+  // Namespace each IP under its bucket so the budgets never cross-contaminate.
+  function keyOf(bucket, ip) {
+    return bucket + '\0' + ip;
+  }
+
+  function allow(bucket, ip) {
+    const limitPerMin = limits[bucket];
     const now = Date.now();
-    let b = buckets.get(ip);
+    const key = keyOf(bucket, ip);
+    let b = buckets.get(key);
     if (!b) {
       b = { tokens: limitPerMin, last: now };
-      buckets.set(ip, b);
+      buckets.set(key, b);
     }
     const refill = ((now - b.last) / WINDOW_MS) * limitPerMin;
     b.tokens = Math.min(limitPerMin, b.tokens + refill);
@@ -120,8 +133,8 @@ function createRateLimiter(limitPerMin) {
 
   function prune() {
     const now = Date.now();
-    for (const [ip, b] of buckets) {
-      if (now - b.last > WINDOW_MS * 2) buckets.delete(ip);
+    for (const [key, b] of buckets) {
+      if (now - b.last > WINDOW_MS * 2) buckets.delete(key);
     }
   }
 
@@ -234,13 +247,15 @@ function handleApi(req, res, ctx, pathname) {
     return;
   }
 
-  // Rate limit the collect endpoint only.
-  if (isCollect) {
-    const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : 'unknown';
-    if (!ctx.rateLimiter.allow(ip)) {
-      sendJson(res, 429, { error: 'rate limit exceeded' }, cors);
-      return;
-    }
+  // Rate limit every /api/* request: the write path (/api/collect) on its
+  // tight budget, read endpoints on their own generous one. Static file and
+  // dashboard serving never reaches here, so it is never limited. Keyed on the
+  // raw socket address (deliberately not X-Forwarded-For).
+  const bucket = isCollect ? 'collect' : 'read';
+  const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : 'unknown';
+  if (!ctx.rateLimiter.allow(bucket, ip)) {
+    sendJson(res, 429, { error: 'rate limit exceeded' }, cors);
+    return;
   }
 
   const byMethod = apiRoutes.get(pathname);
@@ -265,7 +280,10 @@ function handleApi(req, res, ctx, pathname) {
  * @returns {(req: http.IncomingMessage, res: http.ServerResponse) => void}
  */
 export function createRequestHandler(db, config) {
-  const rateLimiter = createRateLimiter(config.RATE_LIMIT_PER_MIN);
+  const rateLimiter = createRateLimiter({
+    collect: config.RATE_LIMIT_PER_MIN,
+    read: READ_RATE_LIMIT_PER_MIN,
+  });
   const ctx = { db, config, rateLimiter };
 
   // Periodically drop stale IP buckets; unref so it never holds the process.
