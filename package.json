@@ -4,7 +4,7 @@
   "description": "Privacy-first, self-hosted user-frustration analytics: rage clicks, dead clicks, form abandonment — no cookies, no PII.",
   "type": "module",
   "license": "MIT",
-  "author": "𝓐.𝓒.𝓑",
+  "author": "A.C.B",
   "homepage": "https://github.com/IACBI/rageclickradar#readme",
   "repository": {
     "type": "git",
