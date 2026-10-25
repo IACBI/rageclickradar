@@ -19,6 +19,7 @@ const DEFAULT_SESSIONS_LIMIT = 50;
 // Hard result caps that bound response size and query cost on busy pages.
 // Rows are ordered before the cap, so each keeps the top-N under its ordering.
 const PAGES_LIMIT = 200;
+const HOTSPOTS_LIMIT = 200;
 const HEATMAP_POINTS_LIMIT = 20000;
 const SESSION_EVENTS_LIMIT = 5000;
 
@@ -72,6 +73,36 @@ function zeroCounts() {
   return { rage: 0, dead: 0, formaband: 0, correction: 0 };
 }
 
+// Per-type row counts for one GROUP BY group, as SQL select columns. COALESCE
+// keeps an empty group at 0 rather than NULL. Returns the SQL plus its arguments
+// in placeholder order.
+function countsSql() {
+  const counts = TYPES.map(
+    (t) => `COALESCE(SUM(CASE WHEN type = ? THEN 1 ELSE 0 END), 0) AS ${t}`,
+  ).join(', ');
+  return { sql: counts, args: [...TYPES] };
+}
+
+// Per-type counts and weighted score for one GROUP BY group. Each event row
+// contributes its type's weight once (the score rule above). Types and weights
+// come from constants, but still go in as bound parameters.
+function scoreAndCountsSql() {
+  const arms = TYPES.map(() => 'WHEN ? THEN ?').join(' ');
+  const score = `SUM(CASE type ${arms} ELSE 0 END) AS score`;
+  const counts = countsSql();
+  return {
+    sql: `${score}, ${counts.sql}`,
+    args: [...TYPES.flatMap((t) => [t, WEIGHTS[t] || 0]), ...counts.args],
+  };
+}
+
+// Copy the per-type columns from a row into a counts object, keeping its key order.
+function countsFromRow(row) {
+  const counts = zeroCounts();
+  for (const t of TYPES) counts[t] = row[t];
+  return counts;
+}
+
 // --- Queries --------------------------------------------------------------
 
 /**
@@ -80,40 +111,24 @@ function zeroCounts() {
  * @returns {Array<{page:string, score:number, counts:object, sessions:number, lastSeen:number}>}
  */
 export function getPages(db) {
-  // Row counts per (page, type) drive both the counts object and the score.
-  const perType = db
-    .prepare('SELECT page, type, COUNT(*) AS cnt FROM events GROUP BY page, type')
-    .all();
-  // Distinct sessions and most-recent activity per page.
-  const perPage = db
+  // Ties on score fall back to page ascending, which is the order the
+  // pre-SQL implementation produced, so the cap keeps the same pages.
+  const agg = scoreAndCountsSql();
+  const rows = db
     .prepare(
-      'SELECT page, COUNT(DISTINCT session_id) AS sessions, MAX(received_at) AS lastSeen ' +
-        'FROM events GROUP BY page',
+      'SELECT page, COUNT(DISTINCT session_id) AS sessions, MAX(received_at) AS lastSeen, ' +
+        `${agg.sql} ` +
+        'FROM events GROUP BY page ORDER BY score DESC, page ASC LIMIT ?',
     )
-    .all();
+    .all(...agg.args, PAGES_LIMIT);
 
-  const byPage = new Map();
-  for (const row of perPage) {
-    byPage.set(row.page, {
-      page: row.page,
-      score: 0,
-      counts: zeroCounts(),
-      sessions: row.sessions,
-      lastSeen: row.lastSeen,
-    });
-  }
-  for (const row of perType) {
-    const entry = byPage.get(row.page);
-    if (!entry) continue;
-    if (Object.prototype.hasOwnProperty.call(entry.counts, row.type)) {
-      entry.counts[row.type] = row.cnt;
-    }
-    entry.score += (WEIGHTS[row.type] || 0) * row.cnt;
-  }
-
-  // Merged in JS from two GROUP BY scans, so the cap is applied to the final
-  // score-sorted array to keep the top PAGES_LIMIT pages.
-  return [...byPage.values()].sort((a, b) => b.score - a.score).slice(0, PAGES_LIMIT);
+  return rows.map((r) => ({
+    page: r.page,
+    score: r.score,
+    counts: countsFromRow(r),
+    sessions: r.sessions,
+    lastSeen: r.lastSeen,
+  }));
 }
 
 /**
@@ -169,38 +184,43 @@ export function getHeatmap(db, params) {
 }
 
 /**
- * Selector-level hotspots for a page, ranked by weighted score descending.
- * Rows with a NULL or empty selector are skipped.
+ * Selector-level hotspots for a page, ranked by weighted score descending and
+ * capped at HOTSPOTS_LIMIT. Rows with a NULL or empty selector are skipped.
+ *
+ * `totals` is an additive field: per-type row counts for the whole page, over
+ * every selector including NULL and empty ones and not subject to the cap. Use
+ * it for page-wide figures; summing `hotspots[].counts` undercounts.
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{page:string}} params
+ * @returns {{page:string, hotspots:Array, totals:{rage:number, dead:number, formaband:number, correction:number}}}
  */
 export function getHotspots(db, params) {
   const page = requirePage(params);
+  const agg = scoreAndCountsSql();
 
+  // Ties on score fall back to selector ascending, matching the pre-SQL order.
   const rows = db
     .prepare(
-      "SELECT selector, type, COUNT(*) AS cnt, SUM(count) AS mag " +
+      'SELECT selector, ' +
+        `${agg.sql}, ` +
+        'COALESCE(SUM(count), 0) AS totalMagnitude ' +
         "FROM events WHERE page = ? AND selector IS NOT NULL AND selector <> '' " +
-        'GROUP BY selector, type',
+        'GROUP BY selector ORDER BY score DESC, selector ASC LIMIT ?',
     )
-    .all(page);
+    .all(...agg.args, page, HOTSPOTS_LIMIT);
 
-  const bySelector = new Map();
-  for (const row of rows) {
-    let entry = bySelector.get(row.selector);
-    if (!entry) {
-      entry = { selector: row.selector, score: 0, counts: zeroCounts(), totalMagnitude: 0 };
-      bySelector.set(row.selector, entry);
-    }
-    if (Object.prototype.hasOwnProperty.call(entry.counts, row.type)) {
-      entry.counts[row.type] = row.cnt;
-    }
-    entry.score += (WEIGHTS[row.type] || 0) * row.cnt;
-    entry.totalMagnitude += row.mag;
-  }
+  const hotspots = rows.map((r) => ({
+    selector: r.selector,
+    score: r.score,
+    counts: countsFromRow(r),
+    totalMagnitude: r.totalMagnitude,
+  }));
 
-  const hotspots = [...bySelector.values()].sort((a, b) => b.score - a.score);
-  return { page, hotspots };
+  const totals = countsSql();
+  const totalRow = db
+    .prepare(`SELECT ${totals.sql} FROM events WHERE page = ?`)
+    .get(...totals.args, page);
+  return { page, hotspots, totals: countsFromRow(totalRow) };
 }
 
 /**
