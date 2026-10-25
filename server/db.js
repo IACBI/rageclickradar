@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_page_type ON events(page, type);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen);
+CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
 `;
 
 /**
@@ -46,6 +47,53 @@ export function openDb(path) {
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(MIGRATION);
   return db;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Parse RETENTION_DAYS. Unset, empty or "0" keeps data forever (the default).
+ * @param {string|undefined} raw
+ * @returns {number} whole days, 0 when retention is off
+ */
+export function parseRetentionDays(raw) {
+  if (raw === undefined || raw === '' || raw === '0') return 0;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n)) {
+    throw new Error(`RETENTION_DAYS: must be a whole number of days, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * Delete events received, and sessions last seen, before the retention cutoff.
+ * Both timestamps are wall-clock ms written by the collector. A session's
+ * last_seen is at least its newest event's received_at, so a session that is
+ * removed has no events left behind.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number} retentionDays 0 or less is a no-op (retention off).
+ * @param {number} [now=Date.now()] Injected by tests.
+ * @returns {{events: number, sessions: number}} rows removed
+ */
+export function purgeExpired(db, retentionDays, now = Date.now()) {
+  if (!(retentionDays > 0)) return { events: 0, sessions: 0 };
+  const cutoff = now - retentionDays * DAY_MS;
+  const deleteEvents = db.prepare('DELETE FROM events WHERE received_at < ?');
+  const deleteSessions = db.prepare('DELETE FROM sessions WHERE last_seen < ?');
+  db.exec('BEGIN');
+  try {
+    const events = deleteEvents.run(cutoff).changes;
+    const sessions = deleteSessions.run(cutoff).changes;
+    db.exec('COMMIT');
+    return { events: Number(events), sessions: Number(sessions) };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore — the original error is the one worth reporting
+    }
+    throw err;
+  }
 }
 
 export default openDb;
