@@ -47,9 +47,53 @@ function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-// Strip any query/fragment and enforce the length cap. Returns the cleaned
-// path, or null if the input is not a valid page string.
-function normalizePage(page) {
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HEX_RE = /^[0-9a-f]{16,}$/i;
+// Base64 may carry `+` and `=`, which arrive percent-encoded as %2B and %3D.
+// The alternation is unambiguous (each branch starts with a different character),
+// so matching stays linear.
+const TOKEN_RE = /^(?:[A-Za-z0-9_+=-]|%2[Bb]|%3[Dd]){24,}$/;
+
+// An email address in a path segment: an `@` (or `%40`) followed later by a dot.
+// Plain indexOf calls keep this linear, with no regex to backtrack.
+function isEmailSegment(seg) {
+  const lower = seg.toLowerCase();
+  const at = lower.indexOf('@');
+  const enc = lower.indexOf('%40');
+  if (at === -1 && enc === -1) return false;
+  const start = at === -1 ? enc + 3 : enc === -1 ? at + 1 : Math.min(at + 1, enc + 3);
+  return lower.indexOf('.', start) !== -1;
+}
+
+// A path segment that names a record (order 42, a UUID, a hash, an opaque
+// token or an email address) rather than a page. Slugs such as my-first-post
+// stay as they are: a token needs 24+ characters, a digit, and at most two
+// separators, which random tokens nearly always meet and hyphenated titles rarely do.
+function isIdSegment(seg) {
+  if (/^\d+$/.test(seg) || UUID_RE.test(seg) || HEX_RE.test(seg)) return true;
+  if (isEmailSegment(seg)) return true;
+  if (!TOKEN_RE.test(seg) || !/\d/.test(seg)) return false;
+  return (seg.match(/[-_]/g) || []).length <= 2;
+}
+
+/**
+ * Collapse identifier-like path segments to ':id'. Heuristic: a numeric
+ * segment such as a year is collapsed too.
+ * @param {string} page A path with no query or fragment.
+ * @returns {string}
+ */
+export function redactPath(page) {
+  return page
+    .split('/')
+    .map((seg) => (isIdSegment(seg) ? ':id' : seg))
+    .join('/');
+}
+
+// Strip any query/fragment, enforce the length cap, and optionally collapse
+// identifiers. Returns the cleaned path, or null if the input is not a valid
+// page string. The cap applies to the stored value, so it is checked again after
+// redaction: `:id` is longer than a one-character segment it replaces.
+function normalizePage(page, redact) {
   if (typeof page !== 'string' || !page.startsWith('/')) return null;
   let clean = page;
   const cut = Math.min(
@@ -58,7 +102,8 @@ function normalizePage(page) {
   );
   clean = clean.slice(0, cut);
   if (clean.length === 0 || clean.length > PAGE_MAX_LEN) return null;
-  return clean;
+  if (redact) clean = redactPath(clean);
+  return clean.length > PAGE_MAX_LEN ? null : clean;
 }
 
 // Validate + normalize a single event against the envelope dimensions.
@@ -109,10 +154,12 @@ function normalizeEvent(ev, dw, dh) {
  * Validate a collector payload and persist it.
  * @param {import('node:sqlite').DatabaseSync} db Open database handle.
  * @param {string} rawBody Raw request body (may be text/plain via sendBeacon).
+ * @param {{redactPaths?: boolean}} [options] redactPaths defaults to true;
+ *   pass false (PATH_REDACTION=off) to store page paths verbatim.
  * @returns {{status: number, body?: object}} 204 on success (no body),
  *   otherwise 400 with an { error } body.
  */
-export function handleCollectBody(db, rawBody) {
+export function handleCollectBody(db, rawBody, options = {}) {
   let payload;
   try {
     payload = JSON.parse(rawBody);
@@ -130,7 +177,7 @@ export function handleCollectBody(db, rawBody) {
     return { status: 400, body: { error: 'invalid sid' } };
   }
 
-  const page = normalizePage(payload.page);
+  const page = normalizePage(payload.page, options.redactPaths !== false);
   if (page === null) {
     return { status: 400, body: { error: 'invalid page' } };
   }
