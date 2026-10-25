@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-26
+
+Security hardening for self-hosted deployments. Two defaults change; read the
+first two entries under Changed before upgrading.
+
 ### Changed
 
 - **Behavior change: the server binds to `127.0.0.1` by default.** `HOST` used to
@@ -62,4 +67,6 @@ Initial public release.
 - Synthetic session seeder for deterministic demo/test data.
 - Documentation: README quickstart, self-hosting guide, and privacy statement.
 
+[Unreleased]: https://github.com/IACBI/rageclickradar/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/IACBI/rageclickradar/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IACBI/rageclickradar/releases/tag/v0.1.0
