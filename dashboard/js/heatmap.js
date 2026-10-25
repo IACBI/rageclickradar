@@ -37,6 +37,8 @@ const BANDS = {
 };
 
 const IFRAME_TIMEOUT_MS = 3000;
+const REDACTED_PREVIEW_NOTICE =
+  'Live preview is unavailable: this path was redacted, so its identifiers are stored as :id. Showing the abstract layout.';
 
 // Cap the offscreen heat buffer's area so the per-pixel colorize loop stays
 // cheap even when a captured document is tens of thousands of px tall.
@@ -95,6 +97,12 @@ function hexToRgb(hex) {
     };
   }
   return { r: 136, g: 136, b: 136 };
+}
+
+// Redacted paths store identifiers as ':id' (see server/collect.js), so a path
+// like /users/:id names no real route and cannot be loaded into the preview frame.
+export function isRedactedPath(page) {
+  return String(page || '').split('/').includes(':id');
 }
 
 // Most common docW among points (and the tallest docH seen at that width).
@@ -343,6 +351,7 @@ export default async function mount(el, params) {
   let activeType = null; // null = All
   let band = 'all';
   let hotspots = [];
+  let totals = null; // page-wide per-type counts from the server (uncapped)
   let token = 0; // guards against out-of-order async renders
 
   // --- Header + controls (built once) ---
@@ -412,8 +421,10 @@ export default async function mount(el, params) {
   try {
     const hs = await getHotspots(page);
     hotspots = hs && Array.isArray(hs.hotspots) ? hs.hotspots : [];
+    totals = hs && hs.totals ? hs.totals : null;
   } catch {
     hotspots = [];
+    totals = null;
   }
 
   // --- Legend ---
@@ -434,11 +445,10 @@ export default async function mount(el, params) {
     );
   }
 
-  // Sum of a signal type across all hotspots (used for coordinate-less notes).
-  function hotspotCount(type) {
-    let n = 0;
-    for (const hs of hotspots) n += (hs.counts && hs.counts[type]) || 0;
-    return n;
+  // Page-wide count of a signal type. Summing the hotspot list would undercount,
+  // since the list is capped and leaves out NULL and empty selectors.
+  function pageTotal(type) {
+    return (totals && totals[type]) || 0;
   }
 
   function bandParams() {
@@ -478,7 +488,7 @@ export default async function mount(el, params) {
 
   function coordlessNote() {
     const sig = SIGNALS.find((s) => s.key === activeType);
-    const n = hotspotCount(activeType);
+    const n = pageTotal(activeType);
     const label = sig ? sig.title.toLowerCase() : activeType;
     const note = h(
       'div',
@@ -642,7 +652,7 @@ export default async function mount(el, params) {
 
     if (!points.length) {
       // A coordinate-less type filter has data, just nothing to plot — say so.
-      if (activeType && COORDLESS.has(activeType) && hotspotCount(activeType) > 0) {
+      if (activeType && COORDLESS.has(activeType) && pageTotal(activeType) > 0) {
         coordlessNote();
       } else {
         main.replaceChildren(emptyState());
@@ -651,6 +661,10 @@ export default async function mount(el, params) {
     }
 
     const dims = dominantDims(points);
+    if (isRedactedPath(page)) {
+      fallback(points, REDACTED_PREVIEW_NOTICE);
+      return;
+    }
     // Only embed same-origin relative paths; anything else (scheme, host)
     // renders through the wireframe fallback instead of an iframe src.
     if (!isEmbeddablePath(page)) {

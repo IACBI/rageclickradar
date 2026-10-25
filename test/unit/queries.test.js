@@ -212,7 +212,11 @@ test('hotspots: missing page throws QueryError 400; unknown page returns empty',
     () => getHotspots(db, {}),
     (err) => err instanceof QueryError && err.status === 400,
   );
-  assert.deepEqual(getHotspots(db, { page: '/nope' }), { page: '/nope', hotspots: [] });
+  assert.deepEqual(getHotspots(db, { page: '/nope' }), {
+    page: '/nope',
+    hotspots: [],
+    totals: { rage: 0, dead: 0, formaband: 0, correction: 0 },
+  });
 });
 
 // --- /api/sessions --------------------------------------------------------
@@ -369,4 +373,124 @@ test('session detail: event list is capped at 5000', () => {
   db.exec('COMMIT');
   const detail = getSessionDetail(db, 's_cap0000sess');
   assert.equal(detail.events.length, 5000);
+});
+
+// --- Ranked caps keep the right rows ---------------------------------------
+
+// Insert n rage rows for one (page, selector) pair in a single transaction.
+function insertRageRows(db, page, selector, n) {
+  const insE = db.prepare(
+    `INSERT INTO events
+       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+     VALUES ('s_rank0000cap', ?, 'rage', ?, 1, 1, 800, 600, ?, 1, NULL, 1)`,
+  );
+  for (let i = 0; i < n; i++) insE.run(page, i, selector);
+}
+
+function seedRankSession(db) {
+  db.prepare(
+    "INSERT INTO sessions (id, started_at, last_seen, vw, vh) VALUES ('s_rank0000cap', 1, 1, 800, 600)",
+  ).run();
+}
+
+test('pages: cap keeps the highest-scoring pages, ranked by score', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  // Page i has i+1 rage rows, so its score is 3*(i+1): the top 200 are i=249..50.
+  db.exec('BEGIN');
+  for (let i = 0; i < 250; i++) insertRageRows(db, `/rank${i}`, '#x', i + 1);
+  db.exec('COMMIT');
+  const pages = getPages(db);
+  assert.equal(pages.length, 200);
+  assert.equal(pages[0].page, '/rank249');
+  assert.equal(pages[0].score, 750);
+  assert.equal(pages[199].page, '/rank50');
+  assert.equal(pages[199].score, 153);
+  assert.deepEqual(
+    pages.map((p) => p.score),
+    [...pages.map((p) => p.score)].sort((a, b) => b - a),
+  );
+});
+
+test('pages: equal scores are ordered by page ascending', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  insertRageRows(db, '/zeta', '#x', 2);
+  insertRageRows(db, '/alpha', '#x', 2);
+  insertRageRows(db, '/mid', '#x', 2);
+  assert.deepEqual(
+    getPages(db).map((p) => p.page),
+    ['/alpha', '/mid', '/zeta'],
+  );
+});
+
+test('hotspots: cap keeps the highest-scoring selectors and reports exact totals', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  // Selector i has i+1 rage rows: the top 200 are i=259..60.
+  db.exec('BEGIN');
+  for (let i = 0; i < 260; i++) insertRageRows(db, '/big', `#s${i}`, i + 1);
+  db.exec('COMMIT');
+  const { hotspots } = getHotspots(db, { page: '/big' });
+  assert.equal(hotspots.length, 200);
+  assert.equal(hotspots[0].selector, '#s259');
+  assert.equal(hotspots[0].score, 3 * 260);
+  assert.equal(hotspots[0].totalMagnitude, 260);
+  assert.equal(hotspots[199].selector, '#s60');
+  assert.equal(hotspots[199].score, 3 * 61);
+});
+
+// `totals` is the page-wide count per type, so it must include rows that the
+// hotspot list leaves out: NULL and empty selectors, and selectors past the cap.
+test('hotspots: totals count every row on the page, including NULL and empty selectors', () => {
+  const db = seededDb();
+  assert.deepEqual(getHotspots(db, { page: '/p1' }).totals, {
+    rage: 2,
+    dead: 2, // the NULL-selector dead row is counted here, though not in hotspots
+    formaband: 0,
+    correction: 1, // the coordinate-less correction row
+  });
+  assert.deepEqual(getHotspots(db, { page: '/p2' }).totals, {
+    rage: 2,
+    dead: 1, // the empty-string selector row
+    formaband: 1,
+    correction: 1,
+  });
+});
+
+test('hotspots: totals are not limited by HOTSPOTS_LIMIT', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  db.exec('BEGIN');
+  for (let i = 0; i < 260; i++) insertRageRows(db, '/wide', `#w${i}`, 1);
+  db.exec('COMMIT');
+  const { hotspots, totals } = getHotspots(db, { page: '/wide' });
+  assert.equal(hotspots.length, 200);
+  // Summing the capped list would give 200; the page really has 260 rage rows.
+  assert.equal(totals.rage, 260);
+});
+
+test('hotspots: a page with only coordinate-less signals has totals and no hotspots', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  db.prepare(
+    `INSERT INTO events
+       (session_id, page, type, ts, x, y, doc_w, doc_h, selector, count, meta, received_at)
+     VALUES ('s_zzzz9999yyyy', '/form', 'formaband', 1, NULL, NULL, 800, 600, NULL, 1, NULL, 1)`,
+  ).run();
+  const { hotspots, totals } = getHotspots(db, { page: '/form' });
+  assert.deepEqual(hotspots, []);
+  assert.deepEqual(totals, { rage: 0, dead: 0, formaband: 1, correction: 0 });
+});
+
+test('hotspots: equal scores are ordered by selector ascending', () => {
+  const db = freshDb();
+  seedRankSession(db);
+  insertRageRows(db, '/tie', '#zz', 1);
+  insertRageRows(db, '/tie', '#aa', 1);
+  insertRageRows(db, '/tie', '#mm', 1);
+  assert.deepEqual(
+    getHotspots(db, { page: '/tie' }).hotspots.map((h) => h.selector),
+    ['#aa', '#mm', '#zz'],
+  );
 });
