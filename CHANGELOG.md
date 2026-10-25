@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fewer rows.
 - CI hardening: read-only `GITHUB_TOKEN` permissions for every job, actions pinned
   to commit SHAs, and Dependabot updates for npm and GitHub Actions.
+- Docs trimmed to English and Turkish (README) and English (`docs/`).
 
 ### Added
 
