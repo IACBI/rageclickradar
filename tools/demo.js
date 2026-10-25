@@ -18,7 +18,7 @@ const ROOT = path.resolve(__dirname, '..');
 
 const PORT = Number(process.env.PORT) || 8639;
 const DB_PATH = process.env.DB_PATH || './data/demo.db';
-const BASE_URL = `http://localhost:${PORT}`;
+const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 const TRACKER_BUNDLE = path.join(ROOT, 'tracker', 'dist', 'radar.min.js');
 const BUILD_SCRIPT = path.join(ROOT, 'tracker', 'build.js');

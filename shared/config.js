@@ -31,6 +31,7 @@ export const CONFIG = Object.freeze({
 
   // Server
   DEFAULT_PORT: 8639, // collector/dashboard HTTP port
+  DEFAULT_HOST: '127.0.0.1', // loopback only; set HOST=0.0.0.0 to expose the unauthenticated read API
   MAX_BODY_BYTES: 65536, // request body cap for /api/collect
   RATE_LIMIT_PER_MIN: 60, // per-IP request budget (in-memory only; IPs never stored)
 

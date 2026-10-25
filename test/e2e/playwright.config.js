@@ -14,7 +14,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 const PORT = 8670;
-const BASE_URL = `http://localhost:${PORT}`;
+// The server binds 127.0.0.1 by default (HOST), so address it there: localhost
+// can resolve to ::1 first and miss the listener.
+const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 // One fresh DB file per run — timestamped so no two runs share state. The
 // server creates parent directories itself, so os.tmpdir() is enough.

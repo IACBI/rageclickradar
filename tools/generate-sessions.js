@@ -6,7 +6,7 @@
 // Node built-ins only (global fetch, node:util). ESM.
 //
 // Usage:
-//   node tools/generate-sessions.js [--sessions 40] [--url http://localhost:8639]
+//   node tools/generate-sessions.js [--sessions 40] [--url http://127.0.0.1:8639]
 //                                   [--seed 42] [--verify]
 //
 // A seed makes generation fully deterministic: the same seed produces byte-for
@@ -521,7 +521,7 @@ async function main() {
   const { values } = parseArgs({
     options: {
       sessions: { type: 'string', default: '40' },
-      url: { type: 'string', default: 'http://localhost:8639' },
+      url: { type: 'string', default: 'http://127.0.0.1:8639' },
       seed: { type: 'string', default: '42' },
       verify: { type: 'boolean', default: false },
     },
