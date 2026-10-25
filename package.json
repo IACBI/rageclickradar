@@ -1,6 +1,6 @@
 {
   "name": "rageclickradar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Privacy-first, self-hosted user-frustration analytics: rage clicks, dead clicks, form abandonment — no cookies, no PII.",
   "type": "module",
   "license": "MIT",
