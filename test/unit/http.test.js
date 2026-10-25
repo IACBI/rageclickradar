@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { openDb } from '../../server/db.js';
-import { createRequestHandler } from '../../server/http.js';
+import { createRequestHandler, createServer, parseTrustedProxies } from '../../server/http.js';
 import { CONFIG } from '../../shared/config.js';
 
 // Minimal ServerResponse stand-in capturing the status of the first writeHead.
@@ -87,4 +87,161 @@ test('collect keeps its own 60/min budget, independent of the read budget', () =
     assert.notEqual(hitCollect(handler, ip), 429, `collect #${i} should pass`);
   }
   assert.equal(hitCollect(handler, ip), 429);
+});
+
+// --- Bind address ---------------------------------------------------------
+
+test('the default HOST is loopback only', () => {
+  assert.equal(CONFIG.DEFAULT_HOST, '127.0.0.1');
+});
+
+test('a server listening on the default host is reachable only on loopback', async () => {
+  const server = createServer(openDb(':memory:'), CONFIG);
+  await new Promise((resolve) => server.listen(0, CONFIG.DEFAULT_HOST, resolve));
+  try {
+    assert.equal(server.address().address, '127.0.0.1');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// --- Trusted proxies (TRUST_PROXY) ----------------------------------------
+
+// Like hitRead, but with request headers so X-Forwarded-For can be exercised.
+function hitReadFrom(handler, ip, xff) {
+  const res = mockRes();
+  const headers = xff === undefined ? {} : { 'x-forwarded-for': xff };
+  handler({ method: 'GET', url: '/api/pages', headers, socket: { remoteAddress: ip } }, res);
+  return res.statusCode;
+}
+
+function proxiedHandler(trust) {
+  return createRequestHandler(openDb(':memory:'), {
+    ...CONFIG,
+    TRUSTED_PROXIES: parseTrustedProxies(trust),
+  });
+}
+
+test('TRUST_PROXY: clients behind one trusted proxy get separate buckets', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.20'), 200);
+  }
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.20'), 429);
+  // Same proxy, different forwarded client: a fresh bucket.
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.21'), 200);
+});
+
+test('TRUST_PROXY: X-Forwarded-For from an untrusted peer is ignored', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  // Rotating the header from a peer that is not a trusted proxy must not
+  // mint new buckets: every request is keyed on the socket address.
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '203.0.113.9', `192.0.2.${i % 250}`), 200);
+  }
+  assert.equal(hitReadFrom(handler, '203.0.113.9', '192.0.2.251'), 429);
+});
+
+test('TRUST_PROXY: the right-most untrusted hop is used, not a spoofed left entry', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  // The client prepends a fake address; the proxy appends the real one.
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '10.0.0.1', `203.0.113.${i % 250}, 198.51.100.30`), 200);
+  }
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '1.2.3.4, 198.51.100.30'), 429);
+});
+
+test('TRUST_PROXY: a chain of trusted proxies is skipped right-to-left', () => {
+  const handler = proxiedHandler('10.0.0.1, 10.0.0.2');
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.40, 10.0.0.2'), 200);
+  }
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.40, 10.0.0.2'), 429);
+});
+
+test('TRUST_PROXY: an IPv4-mapped IPv6 peer matches a plain IPv4 entry', () => {
+  const handler = proxiedHandler('127.0.0.1');
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '::ffff:127.0.0.1', '198.51.100.50'), 200);
+  }
+  assert.equal(hitReadFrom(handler, '::ffff:127.0.0.1', '198.51.100.50'), 429);
+  assert.equal(hitReadFrom(handler, '::ffff:127.0.0.1', '198.51.100.51'), 200);
+});
+
+test('TRUST_PROXY: a malformed forwarded hop falls back to the proxy address', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '10.0.0.1', 'not-an-ip'), 200);
+  }
+  // Still the proxy's own bucket: the malformed header named no client.
+  assert.equal(hitReadFrom(handler, '10.0.0.1', 'not-an-ip'), 429);
+  // A well-formed forwarded address is a separate client, with its own budget.
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.60'), 200);
+});
+
+// Each hop form below must key on the bare client address: 300 requests use one
+// spelling, then a different spelling of the same client is already over budget.
+function assertSameBucket(handler, proxyIp, first, second) {
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, proxyIp, first), 200, `${first} #${i} should pass`);
+  }
+  assert.equal(hitReadFrom(handler, proxyIp, second), 429, `${second} should share the bucket`);
+}
+
+test('TRUST_PROXY: an IPv4 hop with a port is keyed on the address, not the port', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  assertSameBucket(handler, '10.0.0.1', '198.51.100.70:4444', '198.51.100.70');
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.70:5555'), 429);
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.71:4444'), 200);
+});
+
+test('TRUST_PROXY: a bracketed IPv6 hop with a port is keyed on the address', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  assertSameBucket(handler, '10.0.0.1', '[2001:db8::1]:443', '2001:db8::1');
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '[2001:db8::1]'), 429);
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '[2001:db8::2]:443'), 200);
+});
+
+test('TRUST_PROXY: a bracketed IPv6 hop without a port is keyed on the address', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  assertSameBucket(handler, '10.0.0.1', '[2001:db8::3]', '2001:db8::3');
+});
+
+test('TRUST_PROXY: a bare IPv6 hop is kept whole, not split on its colons', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  assertSameBucket(handler, '10.0.0.1', '2001:db8::4', '[2001:db8::4]');
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '2001:db8::5'), 200);
+});
+
+test('TRUST_PROXY: empty hops are skipped, so a trailing comma does not hide the client', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  assertSameBucket(handler, '10.0.0.1', '198.51.100.80, ', '198.51.100.80');
+  assert.equal(hitReadFrom(handler, '10.0.0.1', ' , 198.51.100.80 ,'), 429);
+});
+
+test('TRUST_PROXY: ported trusted proxies in a chain are skipped right-to-left', () => {
+  const handler = proxiedHandler('10.0.0.1, 10.0.0.2');
+  assertSameBucket(handler, '10.0.0.1', '198.51.100.90:1, 10.0.0.2:8080', '198.51.100.90');
+});
+
+test('TRUST_PROXY: a hop with a non-numeric port is malformed and falls back to the proxy', () => {
+  const handler = proxiedHandler('10.0.0.1');
+  for (let i = 0; i < 300; i++) {
+    assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.95:http'), 200);
+  }
+  // Still the proxy's own bucket: the hop named no valid client address.
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.95:http'), 429);
+  assert.equal(hitReadFrom(handler, '10.0.0.1', '198.51.100.95'), 200);
+});
+
+test('parseTrustedProxies: unset is empty, entries are canonicalized, bad input throws', () => {
+  assert.equal(parseTrustedProxies(undefined).size, 0);
+  assert.equal(parseTrustedProxies('').size, 0);
+  assert.deepEqual([...parseTrustedProxies(' ::ffff:10.0.0.1 , 10.0.0.2 ')].sort(), [
+    '10.0.0.1',
+    '10.0.0.2',
+  ]);
+  assert.deepEqual([...parseTrustedProxies('0:0:0:0:0:0:0:1')], ['::1']);
+  assert.throws(() => parseTrustedProxies('10.0.0.1, proxy.internal'), /invalid IP address/);
+  assert.throws(() => parseTrustedProxies('fe80::1%eth0'), /invalid IP address/);
 });

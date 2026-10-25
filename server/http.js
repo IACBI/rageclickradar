@@ -4,6 +4,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,6 +45,89 @@ export function registerRoute(method, routePath, handler) {
     apiRoutes.set(routePath, byMethod);
   }
   byMethod[method.toUpperCase()] = handler;
+}
+
+// --- Client identity for rate limiting ------------------------------------
+
+// Socket peers can appear as IPv4-mapped IPv6 (::ffff:127.0.0.1) or in any
+// IPv6 spelling, so the peer and the configured proxies are compared in one
+// canonical form.
+function canonicalIp(ip) {
+  let s = ip.trim().toLowerCase();
+  if (net.isIPv6(s)) {
+    s = new URL(`http://[${s}]`).hostname.slice(1, -1);
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(s);
+    if (mapped) {
+      const v = parseInt(mapped[1], 16) * 65536 + parseInt(mapped[2], 16);
+      s = [v >>> 24, (v >>> 16) & 255, (v >>> 8) & 255, v & 255].join('.');
+    }
+  }
+  return s;
+}
+
+/**
+ * Parse the TRUST_PROXY setting: a comma-separated list of exact proxy IPs.
+ * Unset or empty trusts no proxy. An invalid entry throws, so a typo fails at
+ * startup rather than silently trusting nothing.
+ * @param {string|undefined} raw
+ * @returns {Set<string>} canonical IPs
+ */
+export function parseTrustedProxies(raw) {
+  const out = new Set();
+  if (!raw) return out;
+  for (const part of raw.split(',')) {
+    const entry = part.trim();
+    if (entry === '') continue;
+    if (!net.isIP(entry) || entry.includes('%')) {
+      throw new Error(`TRUST_PROXY: invalid IP address "${entry}"`);
+    }
+    out.add(canonicalIp(entry));
+  }
+  return out;
+}
+
+// One X-Forwarded-For hop as an address. Proxies commonly append a port
+// (`a.b.c.d:port`) or bracket an IPv6 address (`[addr]` or `[addr]:port`), so
+// those forms are unwrapped first. A bare IPv6 address has several colons and
+// is left alone. Returns null for a hop that is not an address at all.
+function hopAddress(raw) {
+  let s = raw.trim();
+  if (s.startsWith('[')) {
+    const close = s.indexOf(']');
+    if (close === -1) return null;
+    const after = s.slice(close + 1);
+    if (after !== '' && !/^:\d+$/.test(after)) return null;
+    s = s.slice(1, close);
+  } else if ((s.match(/:/g) || []).length === 1) {
+    const colon = s.indexOf(':');
+    if (!/^\d+$/.test(s.slice(colon + 1))) return null;
+    s = s.slice(0, colon);
+  }
+  if (!net.isIP(s) || s.includes('%')) return null;
+  return canonicalIp(s);
+}
+
+// Rate-limit key for a request. X-Forwarded-For is read only when the immediate
+// peer is a trusted proxy. Walking it right-to-left and skipping trusted hops
+// means a client cannot choose its own bucket by prepending addresses: each
+// proxy appends the address it actually saw, and that entry is the one used.
+function clientKeyOf(req, trustedProxies) {
+  const peerRaw = req.socket && req.socket.remoteAddress;
+  const peer = peerRaw ? canonicalIp(peerRaw) : 'unknown';
+  if (!trustedProxies.has(peer)) return peer;
+
+  const xff = req.headers && req.headers['x-forwarded-for'];
+  if (typeof xff !== 'string') return peer;
+  const hops = xff.split(',');
+  for (let i = hops.length - 1; i >= 0; i--) {
+    // An empty hop (for example a trailing comma) names no client: skip it.
+    if (hops[i].trim() === '') continue;
+    // A hop that is not an address means the header cannot be trusted.
+    const ip = hopAddress(hops[i]);
+    if (ip === null) return peer;
+    if (!trustedProxies.has(ip)) return ip;
+  }
+  return peer;
 }
 
 // --- Helpers --------------------------------------------------------------
@@ -215,7 +299,7 @@ async function collectHandler(req, res, ctx) {
 
   let result;
   try {
-    result = handleCollectBody(ctx.db, raw);
+    result = handleCollectBody(ctx.db, raw, { redactPaths: ctx.config.REDACT_PATHS !== false });
   } catch {
     sendJson(res, 500, { error: 'internal error' }, COLLECT_CORS);
     return;
@@ -250,10 +334,10 @@ function handleApi(req, res, ctx, pathname) {
   // Rate limit every /api/* request: the write path (/api/collect) on its
   // tight budget, read endpoints on their own generous one. Static file and
   // dashboard serving never reaches here, so it is never limited. Keyed on the
-  // raw socket address (deliberately not X-Forwarded-For).
+  // socket address, or on the forwarded client when TRUST_PROXY names the peer.
   const bucket = isCollect ? 'collect' : 'read';
-  const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : 'unknown';
-  if (!ctx.rateLimiter.allow(bucket, ip)) {
+  const key = clientKeyOf(req, ctx.trustedProxies);
+  if (!ctx.rateLimiter.allow(bucket, key)) {
     sendJson(res, 429, { error: 'rate limit exceeded' }, cors);
     return;
   }
@@ -284,7 +368,8 @@ export function createRequestHandler(db, config) {
     collect: config.RATE_LIMIT_PER_MIN,
     read: READ_RATE_LIMIT_PER_MIN,
   });
-  const ctx = { db, config, rateLimiter };
+  const trustedProxies = config.TRUSTED_PROXIES || new Set();
+  const ctx = { db, config, rateLimiter, trustedProxies };
 
   // Periodically drop stale IP buckets; unref so it never holds the process.
   const pruneTimer = setInterval(() => rateLimiter.prune(), 60000);
