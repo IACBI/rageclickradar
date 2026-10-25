@@ -27,12 +27,16 @@ availability depends on the Node version:
 
 ## Running it
 
-The server reads two environment variables:
+The server reads these environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP listen port. |
 | `DB_PATH` | `./data/radar.db` | SQLite file path (parent directory is created automatically). |
+| `HOST` | `127.0.0.1` | Interface to bind. Loopback only by default. Set `0.0.0.0` to expose the process; the read API has no authentication, so do that only behind a firewall or proxy. |
+| `TRUST_PROXY` | *(empty)* | Comma-separated exact IPs of reverse proxies you run. Their `X-Forwarded-For` is trusted for rate limiting. Empty trusts none. |
+| `RETENTION_DAYS` | *(off)* | Delete events and sessions older than this many days, at startup and hourly. Empty or `0` keeps everything. |
+| `PATH_REDACTION` | `on` | `off` stores page paths verbatim. Otherwise identifier-like segments (numbers, UUIDs, tokens) are stored as `:id`. See [privacy.md](privacy.md). |
 
 Run on a different port and database path:
 
@@ -63,8 +67,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -95,6 +102,7 @@ Caddy gets you HTTPS in two lines (automatic certificates):
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -113,18 +121,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-The collector never stores the client IP, but the in-memory rate limiter keys on
-the raw socket's remote address — it deliberately ignores `X-Forwarded-For` so a
-client cannot spoof its way into a fresh bucket. Behind a reverse proxy that
-socket address is the proxy itself, so **all** clients share one bucket (per
-budget). Either expose the collector directly, raise the limits to suit your
-traffic, or rate-limit per client at the proxy layer instead (recommended behind
-a proxy).
+> **Warning: with `TRUST_PROXY`, the proxy must append to `X-Forwarded-For`, never pass the client's value through.** With `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, nginx adds the address it saw to whatever the client sent, and the collector reads the rightmost untrusted entry. Do not use `$http_x_forwarded_for` for this header: it forwards the client's own value unchanged, so clients can choose their bucket. Caddy's `reverse_proxy` sets `X-Forwarded-For` from the client address and ignores `X-Forwarded-*` headers sent by clients unless `trusted_proxies` is configured. Keep that default and do not copy the incoming header.
+
+The collector never stores the client IP, but the in-memory rate limiter needs a key per client. By default it keys on the socket's remote address and ignores `X-Forwarded-For`, so a client cannot spoof its way into a fresh bucket. Behind a reverse proxy that address is the proxy itself, so **all** clients share one bucket per budget. To fix that, set `TRUST_PROXY` to the proxy's exact IP address (or a comma-separated list of proxies you run). When the immediate peer is one of them, the limiter reads `X-Forwarded-For` and walks it right to left, skipping trusted proxies, so the first address that is not a trusted proxy is the client. A client cannot pick its own bucket by prepending addresses, and a header from any other peer is ignored. Keep `TRUST_PROXY` empty when clients connect to the process directly.
 
 ## CORS note
 
@@ -140,8 +145,7 @@ since the MVP has no built-in authentication.
 
 ## API limits
 
-Two independent per-IP rate limits protect the process, both in-memory and keyed
-on the raw socket address (see the reverse-proxy caveat above):
+Two independent per-IP rate limits protect the process, both in-memory. The key is the client address: the socket address, or the forwarded client address when `TRUST_PROXY` names the peer (see the reverse proxy section above):
 
 | Endpoint(s) | Limit | Where |
 | --- | --- | --- |
@@ -155,8 +159,11 @@ so each response keeps the top-N under its ordering:
 | Endpoint | Cap | Ordering kept |
 | --- | --- | --- |
 | `/api/pages` | 200 pages | Highest confusion score first. |
+| `/api/hotspots` | 200 selectors per page | Highest confusion score first; equal scores by selector name. |
 | `/api/heatmap` | 20,000 points | Oldest events first (by insert id). |
 | `/api/session` | 5,000 events | Earliest events first (by `ts`). |
+
+`/api/hotspots` also returns `totals`: per-type signal counts for the whole page. It is not limited by the cap and includes NULL and empty selectors. Use it for page-wide figures, because summing `hotspots[].counts` undercounts once the cap applies.
 
 ## Backups
 
@@ -180,34 +187,36 @@ The database is a single SQLite file. Because WAL mode keeps recent writes in th
 
 ## Data retention
 
-The server stamps three wall-clock timestamps in milliseconds (all `Date.now()`,
-none sent by the browser): `events.received_at` (arrival time, drives retention),
-plus `sessions.started_at` and `sessions.last_seen` (set on first insert and
-updated on every subsequent batch — they order the session list and let you prune
-stale sessions). Delete events older than a cutoff and reclaim space:
+Retention is off by default: rows stay until you delete them. To bound the database,
+set `RETENTION_DAYS` to the number of days to keep. 90 is a sensible starting point:
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-Schedule it. On Linux with cron (daily at 03:30):
+The server runs the sweep once at startup and then every hour. It deletes:
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- events whose `received_at` (arrival time) is older than the cutoff, and
+- sessions whose `last_seen` is older than the cutoff.
+
+Both deletes run in one transaction, and an index on `events.received_at` keeps the
+sweep from scanning the whole table. Events are judged one by one, so a session that
+is still active keeps its row and loses only its older events. The sweep writes to
+stdout only when it removes something.
+
+`RETENTION_DAYS` must be a whole number of days. Any other value (for example `90d`)
+stops the server at startup with a one-line error.
+
+SQLite does not shrink the file when rows are deleted; freed pages are reused for new
+data. To return the space to the operating system, run `VACUUM` while the server is
+stopped:
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-On Windows use Task Scheduler to run the same `sqlite3 ... "<sql>"` command on a
-daily trigger. To wipe everything, just stop the server and delete `radar.db`
-along with its `-wal` and `-shm` siblings.
+To wipe everything, stop the server and delete `radar.db` along with its `-wal` and
+`-shm` siblings.
 
 ## Multiple sites
 
@@ -255,12 +264,16 @@ modülün kullanılabilirliği Node sürümüne bağlıdır:
 
 ### Çalıştırma
 
-Sunucu iki ortam değişkeni okur:
+Sunucu şu ortam değişkenlerini okur:
 
 | Değişken | Varsayılan | Anlamı |
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP dinleme portu. |
 | `DB_PATH` | `./data/radar.db` | SQLite dosya yolu (üst dizin otomatik oluşturulur). |
+| `HOST` | `127.0.0.1` | Bağlanılacak arayüz. Varsayılan yalnızca loopback'tir. Süreci dışarı açmak için `0.0.0.0` ayarlayın; okuma API'sinin kimlik doğrulaması yoktur, bu yüzden bunu yalnızca bir güvenlik duvarı veya proxy arkasında yapın. |
+| `TRUST_PROXY` | *(boş)* | Çalıştırdığınız ters proxy'lerin virgülle ayrılmış tam IP'leri. Bunların `X-Forwarded-For` başlığı hız sınırlaması için güvenilir kabul edilir. Boşsa hiçbir proxy güvenilmez. |
+| `RETENTION_DAYS` | *(kapalı)* | Bu gün sayısından eski olayları ve oturumları başlangıçta ve saatte bir siler. Boş veya `0` her şeyi saklar. |
+| `PATH_REDACTION` | `on` | `off` yolları olduğu gibi saklar; aksi halde tanımlayıcı benzeri parçalar (sayılar, UUID'ler, belirteçler) `:id` olarak saklanır. Bkz. [privacy.md](privacy.md). |
 
 Farklı bir port ve veritabanı yolunda çalıştırma:
 
@@ -291,8 +304,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -324,6 +340,7 @@ Caddy iki satırda HTTPS sağlar (otomatik sertifikalar):
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -342,19 +359,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-Toplayıcı istemci IP'sini asla saklamaz, ancak bellek içi hız sınırlayıcı ham
-soketin uzak adresini anahtar olarak kullanır — bir istemcinin taze bir kovaya
-sızmak için kimliğini taklit etmesini önlemek amacıyla `X-Forwarded-For`
-başlığını kasıtlı olarak yoksayar. Bir ters proxy arkasında bu soket adresi
-proxy'nin kendisidir; dolayısıyla **tüm** istemciler tek bir kovayı paylaşır
-(bütçe başına). Ya toplayıcıyı doğrudan sunun, ya sınırları trafiğinize göre
-yükseltin ya da bunun yerine proxy katmanında istemci başına hız sınırlaması
-uygulayın (bir proxy arkasında önerilir).
+> **Uyarı: `TRUST_PROXY` kullanırken proxy `X-Forwarded-For` başlığına ekleme yapmalıdır; istemcinin gönderdiği değeri asla olduğu gibi iletmemelidir.** `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` ile nginx, gördüğü adresi istemcinin gönderdiği değerin sonuna ekler ve toplayıcı en sağdaki güvenilmeyen girdiyi okur. Bu başlık için `$http_x_forwarded_for` kullanmayın: istemcinin kendi değerini değiştirmeden iletir, böylece istemciler kendi kovasını seçebilir. Caddy'nin `reverse_proxy` özelliği `X-Forwarded-For` değerini istemci adresinden ayarlar ve `trusted_proxies` yapılandırılmadıkça istemcilerin gönderdiği `X-Forwarded-*` başlıklarını yok sayar. Bu varsayılanı koruyun ve gelen başlığı kopyalamayın.
+
+Toplayıcı istemci IP'sini asla saklamaz, ancak bellek içi hız sınırlayıcının her istemci için bir anahtara ihtiyacı vardır. Varsayılan olarak bu anahtar soketin uzak adresidir ve `X-Forwarded-For` başlığı yok sayılır; böylece bir istemci sahte başlıkla yeni bir kovaya geçemez. Ters proxy arkasında bu adres proxy'nin kendisidir, dolayısıyla **tüm** istemciler bütçe başına tek bir kovayı paylaşır. Bunu önlemek için `TRUST_PROXY` değerini proxy'nin tam IP adresine (ya da çalıştırdığınız proxy'lerin virgülle ayrılmış listesine) ayarlayın. Doğrudan bağlanan eş bu listedeyse sınırlayıcı `X-Forwarded-For` başlığını okur ve sağdan sola tarar; güvenilen proxy'leri atlayarak ilk güvenilmeyen adresi istemci sayar. İstemci, başına adres ekleyerek kendi kovasını seçemez; başka bir eşten gelen başlık yok sayılır. İstemciler doğrudan işleme bağlanıyorsa `TRUST_PROXY` boş bırakılmalıdır.
 
 ### CORS notu
 
@@ -372,9 +385,7 @@ VPN veya bir izin listesi).
 
 ### API sınırları
 
-Süreci koruyan, ikisi de bellek içi olan ve ham soket adresini anahtar olarak
-kullanan (yukarıdaki ters proxy uyarısına bakın) iki bağımsız IP başına hız
-sınırı vardır:
+Süreci koruyan, ikisi de bellek içi olan iki bağımsız IP başına hız sınırı vardır. Anahtar istemci adresidir: soket adresi veya `TRUST_PROXY` doğrudan eşi adlandırdığında iletilen istemci adresi (yukarıdaki ters proxy bölümüne bakın):
 
 | Uç nokta(lar) | Sınır | Nerede |
 | --- | --- | --- |
@@ -389,8 +400,11 @@ sıralamasına göre ilk N kaydı korur:
 | Uç nokta | Sınır | Korunan sıralama |
 | --- | --- | --- |
 | `/api/pages` | 200 sayfa | En yüksek karışıklık (confusion) puanı önce. |
+| `/api/hotspots` | Sayfa başına 200 seçici | En yüksek karışıklık puanı önce; eşit puanda seçici adına göre. |
 | `/api/heatmap` | 20.000 nokta | En eski olaylar önce (ekleme id'sine göre). |
 | `/api/session` | 5.000 olay | En erken olaylar önce (`ts` alanına göre). |
+
+`/api/hotspots` ayrıca `totals` döndürür: sayfanın tamamı için tür başına sinyal sayıları. Sınırdan etkilenmez ve NULL ile boş seçicileri de kapsar. Sayfa geneli rakamlar için bunu kullanın; sınır uygulandığında `hotspots[].counts` değerlerini toplamak eksik sayar.
 
 ### Yedeklemeler
 
@@ -415,37 +429,37 @@ kopyalamayın — kaydedilmiş veriyi kaçırabilirsiniz. Şunlardan birini kull
 
 ### Veri saklama
 
-Sunucu, milisaniye cinsinden üç adet duvar saati zaman damgası basar (tümü
-`Date.now()`, hiçbiri tarayıcı tarafından gönderilmez): `events.received_at`
-(varış zamanı, veri saklamayı yönetir), ayrıca `sessions.started_at` ve
-`sessions.last_seen` (ilk eklemede ayarlanır ve sonraki her toplu işlemde
-güncellenir — oturum listesini sıralar ve eskimiş oturumları budamanıza olanak
-tanır). Belirli bir kesim noktasından daha eski olayları silin ve alanı geri
-kazanın:
+Saklama varsayılan olarak kapalıdır: satırlar siz silene kadar kalır. Veritabanını
+sınırlamak için `RETENTION_DAYS` değerini tutulacak gün sayısına ayarlayın. 90 makul
+bir başlangıç noktasıdır:
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-Bunu zamanlayın. Linux'ta cron ile (her gün 03:30'da):
+Sunucu temizliği başlangıçta bir kez, sonrasında her saat çalıştırır. Şunları siler:
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- `received_at` (geliş zamanı) eşik değerinden eski olan olaylar ve
+- `last_seen` eşik değerinden eski olan oturumlar.
+
+İki silme işlemi tek bir transaction içinde çalışır; `events.received_at` üzerindeki
+dizin, temizliğin tüm tabloyu taramasını önler. Olaylar tek tek değerlendirilir; bu
+yüzden hâlâ aktif olan bir oturum satırını korur ve yalnızca daha eski olaylarını
+kaybeder. Temizlik yalnızca bir şey sildiğinde stdout'a yazar.
+
+`RETENTION_DAYS` tam gün sayısı olmalıdır. Başka bir değer (ör. `90d`) sunucuyu
+başlangıçta tek satırlık bir hatayla durdurur.
+
+SQLite, satırlar silindiğinde dosyayı küçültmez; boşalan sayfalar yeni veriler için
+yeniden kullanılır. Alanı işletim sistemine geri vermek için sunucu durdurulmuşken
+`VACUUM` çalıştırın:
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-Windows'ta aynı `sqlite3 ... "<sql>"` komutunu günlük bir tetikleyiciyle
-çalıştırmak için Görev Zamanlayıcı'yı (Task Scheduler) kullanın. Her şeyi silmek
-için yalnızca sunucuyu durdurun ve `radar.db` dosyasını `-wal` ile `-shm`
-kardeşleriyle birlikte silin.
+Her şeyi silmek için sunucuyu durdurun ve `radar.db` ile birlikte `-wal` ve `-shm`
+eşlerini silin.
 
 ### Birden çok site
 
@@ -494,12 +508,16 @@ RageClickRadar 是一个**无运行时依赖**的单一 Node 进程，只使用�
 
 ### 运行
 
-服务器读取两个环境变量：
+服务器读取以下环境变量：
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP 监听端口。 |
 | `DB_PATH` | `./data/radar.db` | SQLite 文件路径（父目录会自动创建）。 |
+| `HOST` | `127.0.0.1` | 绑定的网络接口。默认仅回环地址。设为 `0.0.0.0` 即对外暴露进程；读取 API 没有身份验证，因此只应在防火墙或代理之后这样做。 |
+| `TRUST_PROXY` | *（空）* | 你运行的反向代理的精确 IP，以逗号分隔。它们的 `X-Forwarded-For` 会被用于速率限制。为空则不信任任何代理。 |
+| `RETENTION_DAYS` | *（关闭）* | 启动时及每小时删除早于该天数的事件和会话。留空或为 `0` 则全部保留。 |
+| `PATH_REDACTION` | `on` | `off` 原样存储页面路径；否则类似标识符的路径段（数字、UUID、令牌）存储为 `:id`。参见 [privacy.md](privacy.md)。 |
 
 在不同的端口和数据库路径上运行：
 
@@ -530,8 +548,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -562,6 +583,7 @@ Caddy 只需两行即可为你启用 HTTPS（自动签发证书）：
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -580,16 +602,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-采集器从不存储客户端 IP，但内存中的速率限制器以原始套接字的远程地址作为键 ——
-它有意忽略 `X-Forwarded-For`，以防客户端通过伪造该头进入一个全新的桶。在反向
-代理之后，该套接字地址就是代理本身，因此**所有**客户端共享同一个桶（按各自的
-配额）。你可以直接暴露采集器、根据自身流量调高限制，或者改为在代理层按客户端
-进行速率限制（在代理之后推荐这样做）。
+> **警告：使用 `TRUST_PROXY` 时，代理必须追加到 `X-Forwarded-For`，而不能原样转发客户端发送的值。** 使用 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 时，nginx 会把它看到的地址追加到客户端发送的值之后，收集器读取最右侧不受信任的条目。不要为此头使用 `$http_x_forwarded_for`：它会原样转发客户端自己的值，客户端就能选择自己的速率限制桶。Caddy 的 `reverse_proxy` 会根据客户端地址设置 `X-Forwarded-For`，并且除非配置了 `trusted_proxies`，否则会忽略客户端发送的 `X-Forwarded-*` 头。请保留该默认行为，不要复制传入的头。
+
+采集器从不存储客户端 IP，但内存中的速率限制器需要为每个客户端提供一个键。默认情况下，它以套接字的远程地址为键，并忽略 `X-Forwarded-For`，以防客户端通过伪造该头进入一个全新的桶。在反向代理之后，该地址就是代理本身，因此**所有**客户端会共享每个配额的同一个桶。要解决这个问题，请将 `TRUST_PROXY` 设置为代理的精确 IP 地址（或你运行的代理的逗号分隔列表）。当直接相连的对端属于该列表时，速率限制器会读取 `X-Forwarded-For` 并从右向左遍历，跳过受信任的代理，第一个非受信任代理的地址即为客户端。客户端无法通过在头中前置地址来选择自己的桶，来自其他对端的头会被忽略。若客户端直接连接进程，请保持 `TRUST_PROXY` 为空。
 
 ### CORS 说明
 
@@ -603,8 +624,7 @@ CORS 头，因此其他源上的浏览器无法读取你的数据。由于 MVP �
 
 ### API 限制
 
-有两个独立的按 IP 速率限制在保护该进程，二者都在内存中，并以原始套接字地址为键
-（参见上文的反向代理注意事项）：
+有两个独立的按 IP 速率限制在保护该进程，二者都在内存中。其键为客户端地址：套接字地址，或当 `TRUST_PROXY` 指定了对端时的转发客户端地址（参见上文的反向代理一节）：
 
 | 端点 | 限制 | 位置 |
 | --- | --- | --- |
@@ -618,8 +638,11 @@ N 条：
 | 端点 | 上限 | 保留的排序 |
 | --- | --- | --- |
 | `/api/pages` | 200 个页面 | 困惑度（confusion）得分最高的在前。 |
+| `/api/hotspots` | 每页 200 个选择器 | 困惑度得分最高的在前；得分相同则按选择器名称排序。 |
 | `/api/heatmap` | 20,000 个点 | 最早的事件在前（按插入 id）。 |
 | `/api/session` | 5,000 个事件 | 最早的事件在前（按 `ts`）。 |
+
+`/api/hotspots` 还会返回 `totals`：整个页面按类型统计的信号数。它不受上限限制，并包含 NULL 和空的选择器。需要页面整体数字时请使用它；一旦应用上限，对 `hotspots[].counts` 求和会偏低。
 
 ### 备份
 
@@ -643,34 +666,33 @@ N 条：
 
 ### 数据保留
 
-服务器以毫秒为单位打上三个挂钟时间戳（全部来自 `Date.now()`，没有一个是由
-浏览器发送的）：`events.received_at`（到达时间，驱动数据保留），以及
-`sessions.started_at` 和 `sessions.last_seen`（在首次插入时设置，并在之后每个
-批次更新 —— 它们为会话列表排序，并让你能够清理陈旧会话）。删除早于某个截止点的
-事件并回收空间：
+默认关闭：数据会一直保留，直到您删除它。若要限制数据库大小，请将 `RETENTION_DAYS`
+设为要保留的天数。90 是合理的起点：
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-为它设置计划任务。在 Linux 上用 cron（每天 03:30）：
+服务器会在启动时执行一次清理，此后每小时执行一次，删除：
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- `received_at`（到达时间）早于截止时间的事件；
+- `last_seen` 早于截止时间的会话。
+
+两次删除在同一事务中执行，`events.received_at` 上的索引避免清理扫描整张表。事件逐条
+判断，因此仍在活跃的会话会保留其行，只丢失较早的事件。仅当确实删除了内容时，清理才会
+在 stdout 输出日志。
+
+`RETENTION_DAYS` 必须是整数天数。其他值（例如 `90d`）会使服务器在启动时以一行错误信息
+退出。
+
+删除行后 SQLite 不会缩小文件；空出的页面会被新数据复用。若要把空间归还操作系统，请在
+服务器停止时运行 `VACUUM`：
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-在 Windows 上，使用任务计划程序（Task Scheduler）以每日触发器运行同一条
-`sqlite3 ... "<sql>"` 命令。要清空一切，只需停止服务器并删除 `radar.db` 及其
-`-wal` 和 `-shm` 同级文件。
+若要清空全部数据，请停止服务器，并删除 `radar.db` 及其 `-wal`、`-shm` 文件。
 
 ### 多个站点
 
@@ -717,12 +739,16 @@ RageClickRadar — это один процесс Node **без зависимо
 
 ### Запуск
 
-Сервер читает две переменные окружения:
+Сервер читает следующие переменные окружения:
 
 | Переменная | По умолчанию | Значение |
 | --- | --- | --- |
 | `PORT` | `8639` | Порт прослушивания HTTP. |
 | `DB_PATH` | `./data/radar.db` | Путь к файлу SQLite (родительский каталог создаётся автоматически). |
+| `HOST` | `127.0.0.1` | Интерфейс для привязки. По умолчанию только loopback. Чтобы открыть процесс, задайте `0.0.0.0`; у API чтения нет аутентификации, поэтому делайте это только за файрволом или прокси. |
+| `TRUST_PROXY` | *(пусто)* | Точные IP-адреса ваших обратных прокси через запятую. Их `X-Forwarded-For` доверяется при ограничении частоты. Если пусто, не доверяется ни один прокси. |
+| `RETENTION_DAYS` | *(выкл.)* | Удаляет события и сессии старше указанного числа дней при запуске и затем ежечасно. Пустое значение или `0` означает хранить всё. |
+| `PATH_REDACTION` | `on` | `off` сохраняет пути страниц как есть; иначе сегменты, похожие на идентификаторы (числа, UUID, токены), сохраняются как `:id`. См. [privacy.md](privacy.md). |
 
 Запуск на другом порту и с другим путём к базе данных:
 
@@ -753,8 +779,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -786,6 +815,7 @@ Caddy даёт HTTPS в две строки (автоматические сер
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -804,19 +834,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-Сборщик никогда не хранит IP-адрес клиента, но ограничитель частоты в памяти
-использует в качестве ключа удалённый адрес самого сокета — он намеренно
-игнорирует `X-Forwarded-For`, чтобы клиент не мог подделкой заголовка получить
-свежую корзину. За обратным прокси этим адресом сокета является сам прокси,
-поэтому **все** клиенты используют одну общую корзину (на каждый бюджет). Либо
-откройте сборщик напрямую, либо поднимите лимиты под свой трафик, либо вместо
-этого ограничивайте частоту по каждому клиенту на уровне прокси (рекомендуется
-за прокси).
+> **Предупреждение: при `TRUST_PROXY` прокси должен добавлять адрес к `X-Forwarded-For`, а не передавать значение клиента без изменений.** С `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` nginx дописывает увиденный адрес к тому, что прислал клиент, а сборщик читает самую правую недоверенную запись. Не используйте для этого заголовка `$http_x_forwarded_for`: он передаёт собственное значение клиента без изменений, и клиенты смогут выбирать свою корзину. `reverse_proxy` в Caddy задаёт `X-Forwarded-For` по адресу клиента и игнорирует заголовки `X-Forwarded-*`, присланные клиентами, пока не настроен `trusted_proxies`. Оставьте это поведение по умолчанию и не копируйте входящий заголовок.
+
+Сборщик никогда не хранит IP-адрес клиента, но ограничителю частоты в памяти нужен ключ для каждого клиента. По умолчанию ключом служит удалённый адрес сокета, а `X-Forwarded-For` игнорируется, чтобы клиент не мог подделкой заголовка получить свежую корзину. За обратным прокси этот адрес — сам прокси, поэтому **все** клиенты делят одну корзину на каждый бюджет. Чтобы это исправить, задайте `TRUST_PROXY` — точный IP-адрес прокси (или список прокси, которые вы эксплуатируете, через запятую). Если непосредственный партнёр входит в этот список, ограничитель читает `X-Forwarded-For` и идёт по нему справа налево, пропуская доверенные прокси; первый адрес, который не является доверенным прокси, считается клиентом. Клиент не может выбрать свою корзину, дописывая адреса, а заголовок от любого другого партнёра игнорируется. Если клиенты подключаются к процессу напрямую, оставьте `TRUST_PROXY` пустым.
 
 ### Замечание о CORS
 
@@ -834,8 +860,7 @@ CORS, поэтому браузеры на других источниках н�
 
 ### Лимиты API
 
-Процесс защищают два независимых лимита частоты на каждый IP, оба в памяти и оба
-с ключом по адресу необработанного сокета (см. оговорку об обратном прокси выше):
+Процесс защищают два независимых лимита частоты на каждый IP, оба в памяти. Ключом служит адрес клиента: адрес сокета или, когда `TRUST_PROXY` указывает партнёра, переданный адрес клиента (см. раздел об обратном прокси выше):
 
 | Конечная точка(и) | Лимит | Где |
 | --- | --- | --- |
@@ -850,8 +875,11 @@ CORS, поэтому браузеры на других источниках н�
 | Конечная точка | Лимит | Сохраняемый порядок |
 | --- | --- | --- |
 | `/api/pages` | 200 страниц | Сначала наивысший показатель растерянности (confusion). |
+| `/api/hotspots` | 200 селекторов на страницу | Сначала наивысший показатель; при равенстве — по имени селектора. |
 | `/api/heatmap` | 20 000 точек | Сначала самые старые события (по id вставки). |
 | `/api/session` | 5 000 событий | Сначала самые ранние события (по `ts`). |
+
+`/api/hotspots` также возвращает `totals`: число сигналов каждого типа по всей странице. Оно не ограничено лимитом и включает селекторы NULL и пустые. Для значений по всей странице используйте его: суммирование `hotspots[].counts` при действующем лимите занижает итог.
 
 ### Резервное копирование
 
@@ -877,36 +905,35 @@ CORS, поэтому браузеры на других источниках н�
 
 ### Хранение данных
 
-Сервер проставляет три отметки настенного времени в миллисекундах (все
-`Date.now()`, ни одна не отправляется браузером): `events.received_at` (время
-поступления, управляет хранением), а также `sessions.started_at` и
-`sessions.last_seen` (устанавливается при первой вставке и обновляется при каждой
-последующей партии — они упорядочивают список сессий и позволяют удалять
-устаревшие сессии). Удалите события старше некоторого порога и освободите место:
+Хранение по умолчанию выключено: строки остаются, пока вы их не удалите. Чтобы ограничить
+базу, задайте в `RETENTION_DAYS` число дней хранения. Хорошая отправная точка — 90:
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-Поставьте это на расписание. В Linux через cron (ежедневно в 03:30):
+Сервер выполняет очистку один раз при запуске и затем каждый час. Он удаляет:
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- события, у которых `received_at` (время поступления) старше границы, и
+- сессии, у которых `last_seen` старше границы.
+
+Оба удаления выполняются в одной транзакции, а индекс по `events.received_at` не даёт
+очистке сканировать всю таблицу. События оцениваются по отдельности, поэтому активная
+сессия сохраняет свою строку и теряет только более старые события. Очистка пишет в stdout
+только тогда, когда что-то удалила.
+
+`RETENTION_DAYS` должно быть целым числом дней. Любое другое значение (например, `90d`)
+останавливает сервер при запуске с однострочной ошибкой.
+
+SQLite не уменьшает файл при удалении строк: освободившиеся страницы повторно используются
+для новых данных. Чтобы вернуть место операционной системе, выполните `VACUUM`, когда
+сервер остановлен:
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-В Windows используйте Планировщик заданий (Task Scheduler), чтобы запускать ту же
-команду `sqlite3 ... "<sql>"` по ежедневному триггеру. Чтобы стереть всё,
-достаточно остановить сервер и удалить `radar.db` вместе с его соседними файлами
-`-wal` и `-shm`.
+Чтобы стереть всё, остановите сервер и удалите `radar.db` вместе с файлами `-wal` и `-shm`.
 
 ### Несколько сайтов
 
@@ -955,12 +982,16 @@ HTTPS، والنسخ الاحتياطي، والاحتفاظ بالبيانات�
 
 ### التشغيل
 
-يقرأ الخادم متغيرَي بيئة:
+يقرأ الخادم متغيرات البيئة التالية:
 
 | المتغير | الافتراضي | المعنى |
 | --- | --- | --- |
 | `PORT` | `8639` | منفذ الاستماع لـ HTTP. |
 | `DB_PATH` | `./data/radar.db` | مسار ملف SQLite (يُنشأ الدليل الأصل تلقائيًا). |
+| `HOST` | `127.0.0.1` | واجهة الربط. الافتراضي loopback فقط. اضبط `0.0.0.0` لإتاحة العملية للشبكة؛ واجهة القراءة بلا مصادقة، لذا افعل ذلك خلف جدار ناري أو وكيل فقط. |
+| `TRUST_PROXY` | *(فارغ)* | عناوين IP الدقيقة للوكلاء العكسيين التي تشغّلها، مفصولة بفواصل. يُوثَق بترويسة `X-Forwarded-For` الخاصة بها لتحديد المعدل. وإذا كانت فارغة فلا يُوثَق بأي وكيل. |
+| `RETENTION_DAYS` | *(معطّل)* | يحذف الأحداث والجلسات الأقدم من هذا العدد من الأيام عند البدء ثم كل ساعة. القيمة الفارغة أو `0` تُبقي كل شيء. |
+| `PATH_REDACTION` | `on` | `off` يُخزِّن مسارات الصفحات كما هي؛ وإلا فإن المقاطع الشبيهة بالمعرّفات (أرقام، UUID، رموز) تُخزَّن كـ `:id`. راجع [privacy.md](privacy.md). |
 
 التشغيل على منفذ ومسار قاعدة بيانات مختلفين:
 
@@ -991,8 +1022,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -1023,6 +1057,7 @@ sudo systemctl enable --now rageclickradar
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -1041,18 +1076,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-لا يخزّن المُجمِّع عنوان IP الخاص بالعميل أبدًا، لكن محدِّد المعدل في الذاكرة
-يستخدم العنوان البعيد للمقبس (socket) الخام مفتاحًا — وهو يتجاهل `X-Forwarded-For`
-عمدًا حتى لا يتمكن العميل من انتحال هويته للوصول إلى دلو (bucket) جديد. خلف وكيل
-عكسي يكون عنوان المقبس هذا هو الوكيل نفسه، لذلك يتشارك **جميع** العملاء دلوًا
-واحدًا (لكل ميزانية). إمّا أن تعرض المُجمِّع مباشرةً، أو ترفع الحدود بما يناسب
-حركة المرور لديك، أو تحدّ من المعدل لكل عميل عند طبقة الوكيل بدلًا من ذلك (موصى به
-خلف وكيل).
+> **تحذير: عند استخدام `TRUST_PROXY` يجب أن يُلحق الوكيل عنوانه بترويسة `X-Forwarded-For`، لا أن يمرّر قيمة العميل كما هي.** مع `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` يُلحق nginx العنوان الذي رآه بما أرسله العميل، ويقرأ المجمِّع أقصى اليمين من الإدخالات غير الموثوقة. لا تستخدم `$http_x_forwarded_for` لهذه الترويسة: فهو يمرّر قيمة العميل نفسها دون تغيير، فيستطيع العملاء اختيار حاويتهم. و`reverse_proxy` في Caddy يضبط `X-Forwarded-For` من عنوان العميل، ويتجاهل ترويسات `X-Forwarded-*` التي يرسلها العملاء ما لم يُضبط `trusted_proxies`. أبقِ هذا الإعداد الافتراضي ولا تنسخ الترويسة الواردة.
+
+لا يخزّن المجمِّع عنوان IP للعميل أبدًا، لكن محدِّد المعدل في الذاكرة يحتاج إلى مفتاح لكل عميل. افتراضيًا يستخدم المفتاح عنوان الطرف البعيد للمقبس ويتجاهل `X-Forwarded-For`، حتى لا يتمكن العميل من الحصول على حاوية جديدة بتزوير الترويسة. خلف وكيل عكسي يكون هذا العنوان هو الوكيل نفسه، فيتشارك **جميع** العملاء حاوية واحدة لكل ميزانية. لإصلاح ذلك اضبط `TRUST_PROXY` على عنوان IP الدقيق للوكيل (أو قائمة مفصولة بفواصل للوكلاء التي تشغّلها). عندما يكون الطرف المباشر أحدها، يقرأ المحدِّد ترويسة `X-Forwarded-For` ويمرّ عليها من اليمين إلى اليسار متجاوزًا الوكلاء الموثوقة، فيكون أول عنوان ليس وكيلًا موثوقًا هو العميل. ولا يستطيع العميل اختيار حاويته بإضافة عناوين أمامها، وتُتجاهل الترويسة القادمة من أي طرف آخر. أبقِ `TRUST_PROXY` فارغًا عندما يتصل العملاء بالعملية مباشرة.
 
 ### ملاحظة حول CORS
 
@@ -1068,8 +1100,7 @@ server {
 
 ### حدود واجهة برمجة التطبيقات (API)
 
-يحمي العمليةَ حدّان مستقلان للمعدل لكل IP، وكلاهما في الذاكرة ويستخدمان عنوان
-المقبس الخام مفتاحًا (راجع تنبيه الوكيل العكسي أعلاه):
+يحمي العمليةَ حدّان مستقلان للمعدل لكل IP، وكلاهما في الذاكرة، ويكون المفتاح هو عنوان العميل: عنوان المقبس، أو عنوان العميل المُعاد توجيهه عندما يحدّد `TRUST_PROXY` الطرف المباشر (راجع قسم الوكيل العكسي أعلاه):
 
 | نقطة/نقاط النهاية | الحد | الموضع |
 | --- | --- | --- |
@@ -1083,8 +1114,11 @@ server {
 | نقطة النهاية | الحد | الترتيب المحفوظ |
 | --- | --- | --- |
 | `/api/pages` | 200 صفحة | الأعلى في درجة الارتباك (confusion) أولًا. |
+| `/api/hotspots` | 200 محدِّدًا لكل صفحة | الأعلى في درجة الارتباك أولًا؛ وعند التساوي حسب اسم المحدِّد. |
 | `/api/heatmap` | 20٬000 نقطة | الأحداث الأقدم أولًا (حسب معرّف الإدراج). |
 | `/api/session` | 5٬000 حدث | الأحداث الأبكر أولًا (حسب `ts`). |
+
+تُرجع `/api/hotspots` أيضًا الحقل `totals`: عدد الإشارات لكل نوع على مستوى الصفحة كلها. وهو غير مقيَّد بالحد، ويشمل المحدِّدات NULL والفارغة. استخدمه للأرقام على مستوى الصفحة، لأن جمع `hotspots[].counts` يقلّل العدد بعد تطبيق الحد.
 
 ### النسخ الاحتياطي
 
@@ -1108,34 +1142,33 @@ server {
 
 ### الاحتفاظ بالبيانات
 
-يختم الخادم ثلاثة طوابع زمنية بتوقيت الساعة الحائطية بالمللي ثانية (كلها
-`Date.now()`، ولا يرسل المتصفح أيًّا منها): `events.received_at` (وقت الوصول،
-ويقود الاحتفاظ)، إضافةً إلى `sessions.started_at` و`sessions.last_seen` (يُضبطان
-عند أول إدراج ويُحدَّثان مع كل دفعة لاحقة — وهما يرتّبان قائمة الجلسات ويتيحان لك
-تقليم الجلسات القديمة). احذف الأحداث الأقدم من حدٍّ فاصل واستردّ المساحة:
+الاحتفاظ معطّل افتراضيًا: تبقى الصفوف حتى تحذفها. لتحديد حجم قاعدة البيانات، اضبط
+`RETENTION_DAYS` على عدد الأيام المراد الاحتفاظ بها. القيمة 90 نقطة بداية معقولة:
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-جدوِل ذلك. على Linux باستخدام cron (يوميًا في 03:30):
+يُجري الخادم التنظيف مرة عند البدء ثم كل ساعة، فيحذف:
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- الأحداث التي يكون `received_at` (وقت الوصول) فيها أقدم من الحد الزمني، و
+- الجلسات التي يكون `last_seen` فيها أقدم من الحد الزمني.
+
+يُنفَّذ الحذفان في معاملة واحدة، ويمنع الفهرس على `events.received_at` التنظيفَ من مسح
+الجدول بأكمله. تُقيَّم الأحداث واحدًا واحدًا، فتحتفظ الجلسة النشطة بصفّها وتفقد أحداثها
+الأقدم فقط. يُسجَّل التنظيف على stdout فقط عندما يحذف شيئًا.
+
+يجب أن تكون `RETENTION_DAYS` عددًا صحيحًا من الأيام. أي قيمة أخرى (مثل `90d`) توقف
+الخادم عند البدء برسالة خطأ من سطر واحد.
+
+لا يُصغِّر SQLite الملف عند حذف الصفوف؛ فالصفحات المحرَّرة تُعاد استخدامها للبيانات
+الجديدة. لاستعادة المساحة لنظام التشغيل، شغّل `VACUUM` والخادم متوقف:
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-على Windows، استخدم Task Scheduler لتشغيل الأمر `sqlite3 ... "<sql>"` نفسه بمشغِّل
-يومي. ولمحو كل شيء، ما عليك سوى إيقاف الخادم وحذف `radar.db` مع شقيقيه `-wal`
-و`-shm`.
+لمحو كل شيء، أوقِف الخادم واحذف `radar.db` مع ملفيه `-wal` و`-shm`.
 
 ### مواقع متعددة
 
@@ -1183,12 +1216,16 @@ RageClickRadar は**実行時依存ゼロ**の単一 Node プロセスであり�
 
 ### 実行
 
-サーバーは 2 つの環境変数を読み取ります。
+サーバーは次の環境変数を読み取ります。
 
 | 変数 | デフォルト | 意味 |
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP のリッスンポート。 |
 | `DB_PATH` | `./data/radar.db` | SQLite ファイルのパス（親ディレクトリは自動的に作成されます）。 |
+| `HOST` | `127.0.0.1` | バインドするインターフェース。既定はループバックのみです。`0.0.0.0` を設定するとプロセスを公開します。読み取り API には認証がないため、ファイアウォールやプロキシの背後でのみ行ってください。 |
+| `TRUST_PROXY` | *（空）* | 運用するリバースプロキシの IP アドレスをカンマ区切りで正確に指定します。これらのプロキシの `X-Forwarded-For` をレート制限で信頼します。空の場合はどのプロキシも信頼しません。 |
+| `RETENTION_DAYS` | *（無効）* | 起動時と以後 1 時間ごとに、この日数より古いイベントとセッションを削除します。空または `0` の場合はすべて保持します。 |
+| `PATH_REDACTION` | `on` | `off` はページのパスをそのまま保存します。それ以外では識別子らしいセグメント（数値、UUID、トークン）が `:id` として保存されます。[privacy.md](privacy.md) を参照。 |
 
 別のポートとデータベースパスで実行する場合：
 
@@ -1219,8 +1256,11 @@ Type=simple
 User=rageradar
 WorkingDirectory=/opt/rageclickradar
 # Bind to localhost; a reverse proxy terminates TLS and forwards to it.
+Environment=HOST=127.0.0.1
 Environment=PORT=8639
 Environment=DB_PATH=/var/lib/rageclickradar/radar.db
+# The proxy runs on this host, so its address is the one to trust for X-Forwarded-For.
+Environment=TRUST_PROXY=127.0.0.1
 # Node 24 LTS: no flag needed. On Node 22.5-23.3 use:
 #   ExecStart=/usr/bin/node --experimental-sqlite server/index.js
 ExecStart=/usr/bin/node server/index.js
@@ -1252,6 +1292,7 @@ Caddy なら 2 行で HTTPS が得られます（証明書は自動）。
 
 ```caddy
 analytics.example.com {
+    # Caddy sets X-Forwarded-For to the client address by default.
     reverse_proxy 127.0.0.1:8639
 }
 ```
@@ -1270,18 +1311,15 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8639;
         proxy_set_header Host $host;
+        # Appends the client address. With TRUST_PROXY set to this proxy, the collector reads it.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
-コレクターはクライアント IP を一切保存しませんが、メモリ内のレートリミッターは
-生のソケットのリモートアドレスをキーにします。クライアントが偽装して新しい
-バケットに入り込むのを防ぐため、意図的に `X-Forwarded-For` を無視します。
-リバースプロキシの背後では、このソケットアドレスはプロキシ自身になるため、
-**すべての**クライアントが（予算ごとに）1 つのバケットを共有します。コレクター
-を直接公開するか、トラフィックに合わせて上限を引き上げるか、あるいは代わりに
-プロキシ層でクライアントごとにレート制限してください（プロキシの背後では推奨）。
+> **警告：`TRUST_PROXY` を使う場合、プロキシは `X-Forwarded-For` に追記しなければならず、クライアントが送った値をそのまま転送してはいけません。** `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` では、nginx が見た送信元アドレスをクライアントが送った値の末尾に追記し、コレクターは信頼されていない最も右の要素を読みます。この目的で `$http_x_forwarded_for` を使わないでください。クライアント自身の値を変更せずに渡すため、クライアントが自分のバケットを選べてしまいます。Caddy の `reverse_proxy` は、クライアントのアドレスから `X-Forwarded-For` を設定し、`trusted_proxies` を設定しない限り、クライアントが送った `X-Forwarded-*` ヘッダーを無視します。既定の動作のままにし、受信したヘッダーをコピーしないでください。
+
+コレクターはクライアント IP を一切保存しませんが、メモリ内のレートリミッターにはクライアントごとのキーが必要です。既定では、ソケットのリモートアドレスをキーにし、`X-Forwarded-For` は無視します。クライアントが偽装して新しいバケットに入り込むのを防ぐためです。リバースプロキシの背後では、このアドレスはプロキシ自身になるため、**すべての**クライアントが（予算ごとに）1 つのバケットを共有します。これを解決するには、`TRUST_PROXY` にプロキシの IP アドレス（または運用するプロキシのカンマ区切りリスト）を設定します。直接の接続相手がその一覧に含まれる場合、レートリミッターは `X-Forwarded-For` を読み、右から左へたどって、信頼されたプロキシ以外で最初のアドレスをクライアントとみなします。クライアントは先頭にアドレスを足して自分のバケットを選ぶことはできず、他の接続相手からのヘッダーは無視されます。クライアントがプロセスに直接接続する場合は、`TRUST_PROXY` を空のままにしてください。
 
 ### CORS に関する注記
 
@@ -1298,9 +1336,7 @@ server {
 
 ### API の制限
 
-プロセスを保護する、IP ごとの独立したレート制限が 2 つあり、いずれもメモリ内で、
-生のソケットアドレスをキーにしています（上記のリバースプロキシに関する注意を
-参照）。
+プロセスを保護する、IP ごとの独立したレート制限が 2 つあり、いずれもメモリ内にあります。キーはクライアントアドレスです。ソケットアドレスか、`TRUST_PROXY` が接続相手を指定している場合は転送されたクライアントアドレスを使います（上記のリバースプロキシの節を参照）。
 
 | エンドポイント | 制限 | 場所 |
 | --- | --- | --- |
@@ -1315,8 +1351,11 @@ server {
 | エンドポイント | 上限 | 保持される並び順 |
 | --- | --- | --- |
 | `/api/pages` | 200 ページ | 混乱（confusion）スコアが高い順。 |
+| `/api/hotspots` | ページごとに 200 セレクター | 混乱（confusion）スコアが高い順。同点はセレクター名順。 |
 | `/api/heatmap` | 20,000 ポイント | 古いイベント順（挿入 id 順）。 |
 | `/api/session` | 5,000 イベント | 早いイベント順（`ts` 順）。 |
+
+`/api/hotspots` は `totals` も返します。これはページ全体のシグナル種別ごとの件数で、上限の影響を受けず、NULL や空のセレクターも含みます。ページ全体の数値にはこちらを使ってください。上限が適用されると、`hotspots[].counts` の合計は少なくなります。
 
 ### バックアップ
 
@@ -1342,35 +1381,34 @@ server {
 
 ### データ保持
 
-サーバーは 3 つのウォールクロックのタイムスタンプをミリ秒で刻みます（すべて
-`Date.now()` で、ブラウザから送られるものは 1 つもありません）。`events.received_at`
-（到着時刻。保持を駆動します）に加え、`sessions.started_at` と
-`sessions.last_seen`（最初の挿入時に設定され、以降のバッチごとに更新されます —
-これらはセッション一覧を並べ替え、古くなったセッションを整理できるようにします）。
-ある基準時刻より古いイベントを削除し、領域を回収します。
+データ保持は既定で無効です。行は削除するまで残ります。データベースの大きさを抑えるには、
+`RETENTION_DAYS` に保持する日数を設定します。90 が妥当な出発点です：
 
-```sql
--- Delete events older than 90 days (90 * 24 * 60 * 60 * 1000 ms).
-DELETE FROM events
-WHERE received_at < (strftime('%s','now') * 1000) - (90 * 24 * 60 * 60 * 1000);
-
--- Optionally drop sessions that no longer have any events.
-DELETE FROM sessions
-WHERE id NOT IN (SELECT DISTINCT session_id FROM events);
-
--- Reclaim disk space after large deletes.
-VACUUM;
+```bash
+RETENTION_DAYS=90 npm start
 ```
 
-これをスケジュール化します。Linux では cron（毎日 03:30）で：
+サーバーは起動時に一度、その後は 1 時間ごとに整理を実行し、次のものを削除します：
 
-```cron
-30 3 * * * sqlite3 /var/lib/rageclickradar/radar.db "DELETE FROM events WHERE received_at < (strftime('%s','now')*1000) - (90*24*60*60*1000); DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM events); VACUUM;"
+- `received_at`（到着時刻）がカットオフより古いイベント
+- `last_seen` がカットオフより古いセッション
+
+両方の削除は 1 つのトランザクションで実行され、`events.received_at` のインデックスに
+より整理がテーブル全体をスキャンすることはありません。イベントは 1 件ずつ判定されるため、
+まだ活動中のセッションは行を保持し、古いイベントだけを失います。整理は実際に何かを削除
+したときにのみ stdout に記録されます。
+
+`RETENTION_DAYS` は整数の日数である必要があります。それ以外の値（例：`90d`）を指定すると、
+サーバーは起動時に 1 行のエラーを出して終了します。
+
+SQLite は行を削除してもファイルを縮小しません。解放されたページは新しいデータに再利用
+されます。領域を OS に返すには、サーバーを停止した状態で `VACUUM` を実行します：
+
+```bash
+sqlite3 /var/lib/rageclickradar/radar.db "VACUUM;"
 ```
 
-Windows では、タスク スケジューラを使って同じ `sqlite3 ... "<sql>"` コマンドを
-毎日のトリガーで実行します。すべて消去するには、サーバーを停止し、`radar.db`
-とその `-wal`・`-shm` の兄弟ファイルを削除するだけです。
+すべて消去するには、サーバーを停止して `radar.db` と `-wal`・`-shm` のファイルを削除します。
 
 ### 複数サイト
 

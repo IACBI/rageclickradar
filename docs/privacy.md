@@ -49,6 +49,52 @@ The server also records three wall-clock timestamps the browser never sends (all
 | `started_at` | on the session | When the session's first batch arrived. |
 | `last_seen` | on the session | Updated on every batch; orders the session list newest-first and lets you prune stale sessions. |
 
+## Path redaction
+
+The tracker sends `location.pathname` as-is, and paths often carry identifiers:
+`/users/12345`, `/orders/550e8400-e29b-41d4-a716-446655440000`, or a reset token in
+`/reset/9f86d081884c7d659a2feaa0c55ad015`. Before storage, the collector replaces
+each path segment that looks like an identifier with `:id`:
+
+| Segment looks like | Example | Stored as |
+| --- | --- | --- |
+| only digits | `12345` | `:id` |
+| a UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| hex, 16 or more characters | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| a token: 24 or more of `A-Z a-z 0-9 _ - + =` (`+` and `=` may appear as `%2B` and `%3D`), containing a digit and at most two `-` or `_` | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| an email address: an `@` or `%40` followed later by a dot | `john@example.com`, `john%40example.com` | `:id` |
+
+So `/users/12345/orders/550e8400-…/items` is stored as `/users/:id/orders/:id/items`,
+while `/blog/my-first-post`, `/v2/docs` and `/blog/my-very-long-post-title-about-2024-trends`
+are kept. Redaction is on by default. `PATH_REDACTION=off` stores paths verbatim; use
+it only if your paths never carry identifiers. Any other value stops the server at startup.
+
+Its limits, stated plainly:
+
+- It is a heuristic, not a guarantee. A bare year (`/archive/2024`) is collapsed too.
+- Identifiers written as readable words are not detected: `/users/jane-doe` is stored as-is.
+- It applies to events received after the change. Rows already stored are not rewritten.
+- A redacted path is not a real route, so the dashboard's heatmap does not load a live
+  preview for it (`/users/:id` would be a 404). It shows the abstract layout with a notice.
+
+The rules live in `redactPath()` in [`server/collect.js`](../server/collect.js) and are
+tested in [`test/unit/redact.test.js`](../test/unit/redact.test.js).
+
+## Element ids, classes and `data-radar-ignore`
+
+A signal's `sel` is a CSS selector built from tag names, `id` and `class` attributes
+(and `nth-of-type` positions where needed), exactly as they appear in your markup.
+Text content is never used. An `id` that is not a valid CSS identifier (for example
+one starting with a digit) is skipped in favor of classes, and the selector is capped
+at 120 characters.
+
+That means whatever you put in an `id` or `class` is stored. Do not put personal data
+there, such as `id="jane.doe@example.com"` or `class="customer-8842"`. Use structural
+names such as `id="checkout-submit"`.
+
+To exclude an area, add `data-radar-ignore` to the element or to a container. Signals
+from elements inside it are suppressed, so no selector from that area is sent.
+
 ## What is NOT collected
 
 RageClickRadar deliberately never collects, transmits, or stores:
@@ -88,8 +134,9 @@ Because RageClickRadar is self-hosted, **you host it and you own the data**.
 Nothing is sent to a third party — signals go to your collector and land in your
 SQLite file. That also means the responsibilities are yours:
 
-- **Retention is your policy.** Data stays until you delete it. See the retention
-  SQL and scheduling examples in [self-hosting.md](self-hosting.md).
+- **Retention is your policy.** Data stays until you delete it, unless you set
+  `RETENTION_DAYS` to delete old data automatically (off by default). See
+  [self-hosting.md](self-hosting.md#data-retention).
 - **Access control is yours.** The MVP has no authentication; keep the dashboard
   behind a reverse proxy, VPN, or allow-list.
 - **Disclosure is yours.** If your privacy policy enumerates what you collect, the
@@ -187,6 +234,61 @@ değildir:
 | `started_at` | oturumda | Oturumun ilk yığınının geldiği an. |
 | `last_seen` | oturumda | Her yığında güncellenir; oturum listesini en yeniden en eskiye sıralar ve eskimiş oturumları budamanıza olanak tanır. |
 
+### Yol kimliklerinin gizlenmesi
+
+Tracker, `location.pathname` değerini olduğu gibi gönderir; yollar ise sık sık
+tanımlayıcı taşır: `/users/12345`, `/orders/550e8400-e29b-41d4-a716-446655440000`
+veya `/reset/9f86d081884c7d659a2feaa0c55ad015` içindeki sıfırlama belirteci gibi.
+Depolamadan önce toplayıcı, tanımlayıcıya benzeyen her yol parçasını `:id` ile
+değiştirir:
+
+| Parça şuna benziyorsa | Örnek | Şöyle saklanır |
+| --- | --- | --- |
+| yalnızca rakamlar | `12345` | `:id` |
+| bir UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| 16 veya daha fazla karakterlik onaltılık (hex) | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| bir belirteç: `A-Z a-z 0-9 _ - + =` karakterlerinden en az 24 tane (`+` ve `=` karakterleri `%2B` ve `%3D` olarak da yazılabilir), bir rakam içeren ve en fazla iki `-` veya `_` barındıran | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| bir e-posta adresi: bir `@` veya `%40`, ardından gelen bir nokta | `john@example.com`, `john%40example.com` | `:id` |
+
+Böylece `/users/12345/orders/550e8400-…/items` yolu `/users/:id/orders/:id/items`
+olarak saklanır; `/blog/my-first-post`, `/v2/docs` ve
+`/blog/my-very-long-post-title-about-2024-trends` ise olduğu gibi kalır. Gizleme
+varsayılan olarak açıktır. `PATH_REDACTION=off` yolları olduğu gibi saklar; bunu
+yalnızca yollarınız hiçbir zaman tanımlayıcı taşımıyorsa kullanın. Başka herhangi bir
+değer, sunucunun başlamasını engeller.
+
+Sınırları açıkça belirtmek gerekir:
+
+- Bu bir sezgisel yöntemdir, garanti değildir. Tek başına bir yıl (`/archive/2024`) da
+  daraltılır.
+- Okunabilir kelimelerle yazılmış tanımlayıcılar algılanmaz: `/users/jane-doe` olduğu
+  gibi saklanır.
+- Değişiklikten sonra alınan olaylara uygulanır; daha önce saklanmış satırlar yeniden
+  yazılmaz.
+- Yönlendirilmiş (gizlenmiş) bir yol gerçek bir rota değildir; bu yüzden panodaki ısı
+  haritası bu yol için canlı önizleme yüklemez (`/users/:id` bir 404 olurdu). Bunun yerine
+  soyut düzeni ve bir bildirimi gösterir.
+
+Kurallar [`server/collect.js`](../server/collect.js) içindeki `redactPath()`
+fonksiyonunda uygulanır ve [`test/unit/redact.test.js`](../test/unit/redact.test.js)
+içinde test edilir.
+
+### Öğe kimlikleri, sınıflar ve `data-radar-ignore`
+
+Her sinyalin `sel` alanı; öğenin etiket adlarından, `id` ve `class` niteliklerinden
+(gerektiğinde `nth-of-type` konumundan) oluşan bir CSS seçicidir ve işaretlemenizde
+yazdığı biçimiyle kullanılır. Metin içeriği hiçbir zaman kullanılmaz. Geçerli bir CSS
+tanımlayıcısı olmayan bir `id` (ör. rakamla başlayan) atlanır ve yerine sınıflar
+kullanılır; seçici 120 karakterle sınırlıdır.
+
+Yani `id` veya `class` içine yazdığınız her şey saklanır. Oraya kişisel veri
+koymayın, örneğin `id="jane.doe@example.com"` veya `class="customer-8842"` gibi.
+`id="checkout-submit"` gibi yapısal adlar kullanın.
+
+Bir alanı dışarıda bırakmak için öğeye veya bir kapsayıcıya `data-radar-ignore`
+ekleyin. İçindeki öğelerden gelen sinyaller bastırılır; böylece o alandan hiçbir
+seçici gönderilmez.
+
 ### NELERİN toplanmadığı
 
 RageClickRadar kasıtlı olarak asla şunları toplamaz, iletmez veya saklamaz:
@@ -231,8 +333,9 @@ verinin sahibi sizsiniz**. Üçüncü bir tarafa hiçbir şey gönderilmez — s
 sizin toplayıcınıza gider ve sizin SQLite dosyanıza iner. Bu aynı zamanda
 sorumlulukların size ait olduğu anlamına gelir:
 
-- **Saklama sizin politikanızdır.** Veriler siz silene kadar kalır. Saklama SQL'i
-  ve zamanlama örnekleri için [self-hosting.md](self-hosting.md) belgesine bakın.
+- **Saklama sizin politikanızdır.** Veriler siz silene kadar kalır; `RETENTION_DAYS`
+  ayarlanırsa eski veriler otomatik silinir (varsayılan kapalı). Ayrıntılar için
+  [self-hosting.md](self-hosting.md#veri-saklama) belgesine bakın.
 - **Erişim denetimi size aittir.** MVP'de kimlik doğrulama yoktur; panoyu bir ters
   proxy, VPN veya izin listesinin arkasında tutun.
 - **Bildirim size aittir.** Gizlilik politikanız neyi topladığınızı sıralıyorsa,
@@ -321,6 +424,50 @@ RageClickRadar 旨在衡量*挫败感*，而非*人*。它在浏览器内计算�
 | `started_at` | 会话上 | 该会话第一批数据到达的时刻。 |
 | `last_seen` | 会话上 | 每一批数据都会更新；用于将会话列表按从新到旧排序，并让您可以清理陈旧的会话。 |
 
+### 路径脱敏
+
+tracker 原样发送 `location.pathname`，而路径中常包含标识符：`/users/12345`、
+`/orders/550e8400-e29b-41d4-a716-446655440000`，或 `/reset/9f86d081884c7d659a2feaa0c55ad015`
+中的重置令牌。收集器在存储前会把每个看起来像标识符的路径段替换为 `:id`：
+
+| 路径段类似于 | 示例 | 存储为 |
+| --- | --- | --- |
+| 仅数字 | `12345` | `:id` |
+| UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| 16 个或以上字符的十六进制 | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| 令牌：24 个或以上来自 `A-Z a-z 0-9 _ - + =` 的字符（`+` 和 `=` 也可写作 `%2B` 和 `%3D`），含数字，且 `-` 或 `_` 不超过两个 | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| 电子邮件地址：`@` 或 `%40` 之后紧跟一个点 | `john@example.com`、`john%40example.com` | `:id` |
+
+因此 `/users/12345/orders/550e8400-…/items` 存储为 `/users/:id/orders/:id/items`，而
+`/blog/my-first-post`、`/v2/docs` 和 `/blog/my-very-long-post-title-about-2024-trends`
+保持不变。脱敏默认开启。`PATH_REDACTION=off` 会原样存储路径，仅当您的路径从不包含
+标识符时才应使用。任何其他值都会使服务器在启动时退出。
+
+限制说明：
+
+- 这是启发式方法，而非保证。单独的年份（`/archive/2024`）也会被折叠。
+- 以可读单词形式写出的标识符不会被识别：`/users/jane-doe` 会原样存储。
+- 仅适用于修改之后收到的事件；已存储的行不会被重写。
+- 脱敏后的路径并非真实路由，因此仪表盘的热力图不会为其加载实时预览（`/users/:id` 会返回 404）。
+  它改为显示抽象布局并附带提示。
+
+规则实现于 [`server/collect.js`](../server/collect.js) 中的 `redactPath()`，并由
+[`test/unit/redact.test.js`](../test/unit/redact.test.js) 测试。
+
+### 元素 id、类名与 data-radar-ignore
+
+每个信号的 `sel` 是一个 CSS 选择器，由元素的标签名、`id` 与 `class` 属性（必要时
+加上 `nth-of-type` 位置）构成，内容与您的标记中所写完全一致。从不使用文本内容。
+不是合法 CSS 标识符的 `id`（例如以数字开头）会被跳过，改用类名；选择器长度上限为
+120 个字符。
+
+这意味着您放入 `id` 或 `class` 的任何内容都会被存储。请不要在其中放置个人数据，例如
+`id="jane.doe@example.com"` 或 `class="customer-8842"`。请使用结构性名称，如
+`id="checkout-submit"`。
+
+若要排除某个区域，请在元素或容器上添加 `data-radar-ignore`。其内部元素产生的信号会被
+抑制，因此该区域的选择器不会被发送。
+
 ### 哪些内容不会被收集
 
 RageClickRadar 有意从不收集、传输或存储：
@@ -344,7 +491,7 @@ RageClickRadar 有意从不收集、传输或存储：
 
 由于 RageClickRadar 是自托管的，**由您托管，数据也归您所有**。不会向任何第三方发送任何内容——信号进入您的收集器，并落入您的 SQLite 文件。这也意味着相应的责任由您承担：
 
-- **数据保留由您的策略决定。** 数据会一直保留，直到您删除它。保留 SQL 和调度示例见 [self-hosting.md](self-hosting.md)。
+- **数据保留由您的策略决定。** 数据会一直保留，直到您删除它；设置 `RETENTION_DAYS` 可自动删除旧数据（默认关闭）。详见 [self-hosting.md](self-hosting.md#数据保留)。
 - **访问控制由您负责。** MVP 没有身份验证；请将仪表板置于反向代理、VPN 或允许列表之后。
 - **披露由您负责。** 如果您的隐私政策列举了您所收集的内容，上面的“收集哪些内容”表格就是可供参照的准确清单。
 
@@ -419,6 +566,57 @@ RageClickRadar создан, чтобы измерять *раздражение
 | `started_at` | на сессии | Когда пришла первая партия сессии. |
 | `last_seen` | на сессии | Обновляется при каждой партии; упорядочивает список сессий от новых к старым и позволяет удалять устаревшие сессии. |
 
+### Редактирование путей
+
+Трекер отправляет `location.pathname` как есть, а в путях часто встречаются
+идентификаторы: `/users/12345`, `/orders/550e8400-e29b-41d4-a716-446655440000` или
+токен сброса пароля в `/reset/9f86d081884c7d659a2feaa0c55ad015`. Перед сохранением
+сборщик заменяет каждый сегмент пути, похожий на идентификатор, на `:id`:
+
+| Сегмент похож на | Пример | Сохраняется как |
+| --- | --- | --- |
+| только цифры | `12345` | `:id` |
+| UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| hex длиной 16 и более символов | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| токен: 24 и более символов из `A-Z a-z 0-9 _ - + =` (`+` и `=` могут быть записаны как `%2B` и `%3D`), с цифрой и не более чем двумя `-` или `_` | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| адрес электронной почты: `@` или `%40`, после которых идёт точка | `john@example.com`, `john%40example.com` | `:id` |
+
+Так `/users/12345/orders/550e8400-…/items` сохраняется как `/users/:id/orders/:id/items`,
+а `/blog/my-first-post`, `/v2/docs` и `/blog/my-very-long-post-title-about-2024-trends`
+остаются без изменений. Редактирование включено по умолчанию. `PATH_REDACTION=off`
+сохраняет пути как есть; используйте это, только если пути никогда не содержат
+идентификаторов. Любое другое значение не даст серверу запуститься.
+
+Ограничения, честно:
+
+- Это эвристика, а не гарантия. Голый год (`/archive/2024`) тоже заменяется.
+- Идентификаторы, записанные читаемыми словами, не распознаются: `/users/jane-doe`
+  сохраняется как есть.
+- Правило применяется к событиям, полученным после изменения; уже сохранённые строки
+  не переписываются.
+- Отредактированный путь не является реальным маршрутом, поэтому тепловая карта в панели не
+  загружает для него живой предпросмотр (`/users/:id` дала бы 404). Вместо этого показывается
+  абстрактная раскладка с уведомлением.
+
+Правила реализованы в `redactPath()` в [`server/collect.js`](../server/collect.js) и
+проверяются в [`test/unit/redact.test.js`](../test/unit/redact.test.js).
+
+### id и классы элементов, data-radar-ignore
+
+`sel` каждого сигнала — это CSS-селектор из имён тегов, атрибутов `id` и `class` и,
+при необходимости, позиций `nth-of-type`, в том виде, в каком они записаны в разметке.
+Текст содержимого никогда не используется. `id`, который не является допустимым
+CSS-идентификатором (например, начинается с цифры), пропускается в пользу классов;
+селектор ограничен 120 символами.
+
+Значит, всё, что вы кладёте в `id` или `class`, сохраняется. Не помещайте туда
+персональные данные, например `id="jane.doe@example.com"` или `class="customer-8842"`.
+Используйте структурные имена вроде `id="checkout-submit"`.
+
+Чтобы исключить область, добавьте `data-radar-ignore` к элементу или контейнеру.
+Сигналы от элементов внутри неё подавляются, поэтому селекторы из этой области не
+отправляются.
+
 ### Что НЕ собирается
 
 RageClickRadar намеренно никогда не собирает, не передаёт и не сохраняет:
@@ -464,8 +662,9 @@ RageClickRadar намеренно никогда не собирает, не п�
 ваш сборщик и попадают в ваш файл SQLite. Это также означает, что ответственность
 лежит на вас:
 
-- **Хранение — ваша политика.** Данные остаются, пока вы их не удалите. См. SQL
-  для хранения и примеры планирования в [self-hosting.md](self-hosting.md).
+- **Хранение — ваша политика.** Данные остаются, пока вы их не удалите, если только вы
+  не задали `RETENTION_DAYS` для автоматического удаления (по умолчанию выключено). См.
+  [self-hosting.md](self-hosting.md#хранение-данных).
 - **Контроль доступа — ваш.** В MVP нет аутентификации; держите панель за обратным
   прокси, VPN или списком разрешений.
 - **Раскрытие — ваше.** Если ваша политика конфиденциальности перечисляет, что вы
@@ -565,6 +764,50 @@ agent، ولا أي معرِّف عابر للمواقع. تصف هذه الوث
 | `started_at` | على الجلسة | وقت وصول أول دفعة للجلسة. |
 | `last_seen` | على الجلسة | يُحدَّث مع كل دفعة؛ يرتِّب قائمة الجلسات من الأحدث إلى الأقدم ويتيح لك تشذيب الجلسات القديمة. |
 
+### تنقيح المسارات
+
+يرسل المتتبِّع `location.pathname` كما هو، والمسارات كثيرًا ما تحمل معرّفات: مثل
+`/users/12345` أو `/orders/550e8400-e29b-41d4-a716-446655440000` أو رمز إعادة التعيين
+في `/reset/9f86d081884c7d659a2feaa0c55ad015`. قبل التخزين، يستبدل المجمِّع كل مقطع في
+المسار يشبه المعرّف بـ `:id`:
+
+| المقطع يشبه | مثال | يُخزَّن كـ |
+| --- | --- | --- |
+| أرقامًا فقط | `12345` | `:id` |
+| UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| سداسيًا عشريًا بطول 16 حرفًا أو أكثر | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| رمزًا: 24 حرفًا أو أكثر من `A-Z a-z 0-9 _ - + =` (ويمكن كتابة `+` و`=` على هيئة `%2B` و`%3D`)، يحتوي على رقم، وبما لا يزيد على فاصلين `-` أو `_` | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| عنوان بريد إلكتروني: `@` أو `%40` يليه لاحقًا نقطة | `john@example.com`، `john%40example.com` | `:id` |
+
+فيُخزَّن `/users/12345/orders/550e8400-…/items` بوصفه `/users/:id/orders/:id/items`، بينما
+تبقى `/blog/my-first-post` و`/v2/docs` و`/blog/my-very-long-post-title-about-2024-trends`
+كما هي. التنقيح مفعّل افتراضيًا. يُبقي `PATH_REDACTION=off` المسارات كما هي؛ استخدمه فقط
+إذا كانت مساراتك لا تحمل معرّفات أبدًا. أي قيمة أخرى تمنع الخادم من التشغيل.
+
+حدوده بوضوح:
+
+- هذه قاعدة إرشادية وليست ضمانًا. فالسنة وحدها (`/archive/2024`) تُطوى هي أيضًا.
+- لا تُكتشف المعرّفات المكتوبة بكلمات مقروءة: `/users/jane-doe` تُخزَّن كما هي.
+- تنطبق على الأحداث المستلمة بعد التغيير؛ ولا تُعاد كتابة الصفوف المخزّنة سابقًا.
+- المسار المُنقَّح ليس مسارًا حقيقيًا، لذلك لا تحمّل خريطة الحرارة في لوحة التحكم معاينة حيّة له (سيعيد `/users/:id` خطأ 404). وبدلًا من ذلك تعرض تخطيطًا مجرّدًا مع إشعار.
+
+القواعد مُنفَّذة في `redactPath()` في [`server/collect.js`](../server/collect.js) ومُختبَرة
+في [`test/unit/redact.test.js`](../test/unit/redact.test.js).
+
+### معرّفات العناصر وفئاتها و data-radar-ignore
+
+إن `sel` لكل إشارة هو محدِّد CSS مبني من أسماء الوسوم وخصائص `id` و`class`، ومواضع
+`nth-of-type` عند الحاجة، كما هي مكتوبة في صفحتك تمامًا. لا يُستخدم محتوى النص أبدًا.
+يُتخطّى `id` الذي ليس معرّف CSS صالحًا (مثلًا يبدأ برقم) لصالح الفئات، ويُقتصر
+المحدِّد على 120 حرفًا.
+
+أي شيء تضعه في `id` أو `class` يُخزَّن إذن. لا تضع فيه بيانات شخصية، مثل
+`id="jane.doe@example.com"` أو `class="customer-8842"`. استخدم أسماء بنيوية مثل
+`id="checkout-submit"`.
+
+لاستبعاد منطقة، أضف `data-radar-ignore` إلى العنصر أو إلى حاوية. تُكبَت الإشارات
+الصادرة من العناصر داخلها، فلا يُرسَل أي محدِّد من تلك المنطقة.
+
 ### ما الذي لا يُجمَع
 
 يمتنع RageClickRadar عمدًا عن جمع أو نقل أو تخزين أيٍّ مما يلي على الإطلاق:
@@ -604,8 +847,8 @@ agent، ولا أي معرِّف عابر للمواقع. تصف هذه الوث
 يُرسَل أي شيء إلى طرف ثالث — فالإشارات تذهب إلى مجمِّعك وتستقر في ملف SQLite الخاص
 بك. وهذا يعني أيضًا أن المسؤوليات تقع على عاتقك:
 
-- **الاحتفاظ سياستك أنت.** تبقى البيانات حتى تحذفها. راجع SQL الاحتفاظ وأمثلة
-  الجدولة في [self-hosting.md](self-hosting.md).
+- **الاحتفاظ سياستك أنت.** تبقى البيانات حتى تحذفها، إلا إذا ضبطت `RETENTION_DAYS` لحذفها
+  تلقائيًا (معطّل افتراضيًا). راجع [self-hosting.md](self-hosting.md#الاحتفاظ-بالبيانات).
 - **التحكّم في الوصول مسؤوليتك.** لا يوجد في الـ MVP أي مصادقة؛ فأبقِ لوحة المعلومات
   خلف وكيل عكسي أو VPN أو قائمة سماح.
 - **الإفصاح مسؤوليتك.** إذا كانت سياسة الخصوصية لديك تُعدِّد ما تجمعه، فإن جدول «ما
@@ -690,6 +933,52 @@ RageClickRadar は、*人*ではなく*フラストレーション*を測定す�
 | `started_at` | セッション上 | そのセッションの最初のバッチが到着した時刻。 |
 | `last_seen` | セッション上 | バッチごとに更新される。セッション一覧を新しい順に並べ、古くなったセッションを整理できるようにする。 |
 
+### パスの秘匿化
+
+トラッカーは `location.pathname` をそのまま送信しますが、パスには識別子が含まれること
+がよくあります：`/users/12345`、`/orders/550e8400-e29b-41d4-a716-446655440000`、
+`/reset/9f86d081884c7d659a2feaa0c55ad015` のリセットトークンなど。収集器は保存前に、
+識別子らしいパスセグメントを `:id` に置き換えます：
+
+| セグメントの形式 | 例 | 保存される形 |
+| --- | --- | --- |
+| 数字のみ | `12345` | `:id` |
+| UUID | `550e8400-e29b-41d4-a716-446655440000` | `:id` |
+| 16 文字以上の 16 進数 | `9f86d081884c7d659a2feaa0c55ad015` | `:id` |
+| トークン：`A-Z a-z 0-9 _ - + =` のみで 24 文字以上（`+` と `=` は `%2B` と `%3D` とも書けます）、数字を含み、`-` と `_` は 2 個以下 | `Xk9_ab3dQ7pLm2wZ8rT5vYc1` | `:id` |
+| メールアドレス：`@` または `%40` の後にドットが続く | `john@example.com`、`john%40example.com` | `:id` |
+
+そのため `/users/12345/orders/550e8400-…/items` は `/users/:id/orders/:id/items` として
+保存され、`/blog/my-first-post`、`/v2/docs`、`/blog/my-very-long-post-title-about-2024-trends`
+はそのまま残ります。秘匿化は既定で有効です。`PATH_REDACTION=off` を設定するとパスを
+そのまま保存します。パスに識別子が一切含まれないと確信できる場合にのみ使用してください。
+それ以外の値を指定すると、サーバーは起動時に終了します。
+
+限界について正直に記します：
+
+- これはヒューリスティックであり、保証ではありません。年だけの値（`/archive/2024`）も
+  置き換えられます。
+- 読める単語として書かれた識別子は検出されません：`/users/jane-doe` はそのまま保存されます。
+- 変更後に受信したイベントにのみ適用されます。既に保存された行は書き換えられません。
+- 秘匿化されたパスは実在のルートではないため、ダッシュボードのヒートマップはそのパスのライブプレビューを読み込みません（`/users/:id` は 404 になります）。代わりに抽象的なレイアウトと注記を表示します。
+
+ルールは [`server/collect.js`](../server/collect.js) の `redactPath()` に実装されており、
+[`test/unit/redact.test.js`](../test/unit/redact.test.js) でテストされています。
+
+### 要素の id・class と data-radar-ignore
+
+各シグナルの `sel` は、要素のタグ名、`id` と `class` の属性（必要に応じて `nth-of-type`
+の位置）から組み立てられた CSS セレクターで、マークアップに書かれているとおりの内容
+です。テキスト内容は一切使用しません。有効な CSS 識別子ではない `id`（例：数字で始まる
+もの）はスキップされクラスが使われ、セレクターは 120 文字で打ち切られます。
+
+つまり、`id` や `class` に書いた内容はすべて保存されます。`id="jane.doe@example.com"` や
+`class="customer-8842"` のように、そこへ個人データを入れないでください。
+`id="checkout-submit"` のような構造的な名前を使ってください。
+
+領域を除外するには、要素またはコンテナに `data-radar-ignore` を付けます。その内側の要素
+からのシグナルは抑制されるため、その領域のセレクターは送信されません。
+
 ### 収集され「ない」もの
 
 RageClickRadar は、意図的に以下を決して収集・送信・保存しません：
@@ -713,7 +1002,7 @@ RageClickRadar は、意図的に以下を決して収集・送信・保存し�
 
 RageClickRadar はセルフホストであるため、**あなたがホストし、あなたがデータを所有します**。第三者には何も送信されません。シグナルはあなたのコレクターへ送られ、あなたの SQLite ファイルに格納されます。それはまた、責任があなたにあることを意味します：
 
-- **保持はあなたのポリシーです。** データは削除するまで残ります。保持用の SQL とスケジューリングの例は [self-hosting.md](self-hosting.md) を参照してください。
+- **保持はあなたのポリシーです。** `RETENTION_DAYS` を設定しない限り、データは削除するまで残ります（既定では無効）。設定すると古いデータは自動で削除されます。詳しくは [self-hosting.md](self-hosting.md#データ保持) を参照してください。
 - **アクセス制御はあなたの責任です。** MVP には認証がありません。ダッシュボードはリバースプロキシ、VPN、または許可リストの背後に置いてください。
 - **開示はあなたの責任です。** プライバシーポリシーで収集内容を列挙する場合、上記の「何が収集されるのか」の表が、そのまま反映すべき正確な一覧です。
 
