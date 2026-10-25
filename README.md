@@ -138,6 +138,10 @@ Use the full key names below; each key is optional and falls back to its default
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP port for the collector and dashboard. |
 | `DB_PATH` | `./data/radar.db` | SQLite database file (WAL mode; parent dir is created). |
+| `HOST` | `127.0.0.1` | Interface to bind. Loopback only by default; set `0.0.0.0` to expose it (the read API has no authentication). |
+| `TRUST_PROXY` | *(empty)* | Comma-separated IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting. |
+| `RETENTION_DAYS` | *(off)* | Delete events and sessions older than this many days, at startup and hourly. Empty or `0` keeps everything. See [self-hosting.md](docs/self-hosting.md#data-retention). |
+| `PATH_REDACTION` | `on` | `off` stores page paths verbatim. Otherwise identifier-like segments (numbers, UUIDs, tokens) are stored as `:id`. See [privacy.md](docs/privacy.md). |
 
 Server-side thresholds (`DEFAULT_PORT`, `MAX_BODY_BYTES`, `RATE_LIMIT_PER_MIN`,
 `SCORE_WEIGHTS`) also live in `shared/config.js` but are not browser-overridable.
@@ -172,7 +176,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -192,7 +196,7 @@ RageClickRadar is designed to avoid collecting personal data: no cookies, no IP
 storage, no fingerprinting, per-tab anonymous ids only. That is intended to keep
 you out of consent-banner territory, but interpretations vary by jurisdiction and
 this is not legal advice. Read [docs/privacy.md](docs/privacy.md) before you
-decide.
+decide. Path identifiers (numeric IDs, UUIDs, tokens) are redacted before storage by default, but element `id` and `class` values are stored as written, so keep personal data out of them. See [privacy.md](docs/privacy.md).
 
 **Does it work with single-page apps?**
 Yes. The tracker listens on `popstate` and `hashchange`, so History-API and hash
@@ -208,9 +212,7 @@ restrict it (see [docs/self-hosting.md](docs/self-hosting.md)).
 The minified bundle is 5104 bytes (hard budget: 5120), dependency-free.
 
 **How do I delete data?**
-It is your SQLite file. Stop the server and delete `radar.db` (plus its `-wal` /
-`-shm` siblings) to wipe everything, or run a dated `DELETE` for retention — see
-the retention SQL in [docs/self-hosting.md](docs/self-hosting.md).
+It is your SQLite file. Set `RETENTION_DAYS` to delete old data automatically (off by default; 90 is a sensible start). To wipe everything, stop the server and delete `radar.db` (plus its `-wal` / `-shm` siblings). See [docs/self-hosting.md](docs/self-hosting.md#data-retention).
 
 **Production hardening?**
 See [docs/self-hosting.md](docs/self-hosting.md) for systemd, HTTPS reverse
@@ -221,7 +223,7 @@ proxies, backups, retention, and multi-site notes.
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
@@ -388,6 +390,10 @@ anahtar isteğe bağlıdır ve varsayılan değerine geri döner.
 | --- | --- | --- |
 | `PORT` | `8639` | Toplayıcı ve pano için HTTP portu. |
 | `DB_PATH` | `./data/radar.db` | SQLite veritabanı dosyası (WAL modu; üst dizin oluşturulur). |
+| `HOST` | `127.0.0.1` | Bağlanılacak arayüz. Varsayılan yalnızca loopback; `0.0.0.0` ile dışarı açılır (okuma API'sinin kimlik doğrulaması yok). |
+| `TRUST_PROXY` | *(boş)* | Hız sınırlaması için `X-Forwarded-For` değerine güvenilen ters proxy'lerin virgülle ayrılmış IP'leri. |
+| `RETENTION_DAYS` | *(kapalı)* | Bu gün sayısından eski olayları ve oturumları başlangıçta ve saatte bir siler. Boş veya `0` her şeyi saklar. Bkz. [self-hosting.md](docs/self-hosting.md#veri-saklama). |
+| `PATH_REDACTION` | `on` | `off` yolları olduğu gibi saklar; aksi halde tanımlayıcı benzeri parçalar (sayılar, UUID'ler, belirteçler) `:id` olarak saklanır. Bkz. [privacy.md](docs/privacy.md). |
 
 Sunucu tarafı eşikler (`DEFAULT_PORT`, `MAX_BODY_BYTES`, `RATE_LIMIT_PER_MIN`,
 `SCORE_WEIGHTS`) da `shared/config.js` içinde yer alır ancak tarayıcıdan geçersiz
@@ -423,7 +429,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -443,7 +449,7 @@ RageClickRadar, kişisel veri toplamaktan kaçınacak şekilde tasarlanmıştır
 yok, IP saklama yok, parmak izi çıkarma yok, yalnızca sekme başına anonim
 kimlikler. Bu, sizi onay bandı bölgesinden uzak tutmayı amaçlar, ancak yorumlar
 yargı bölgesine göre değişir ve bu hukuki tavsiye değildir. Karar vermeden önce
-[docs/privacy.md](docs/privacy.md) dosyasını okuyun.
+[docs/privacy.md](docs/privacy.md) dosyasını okuyun. Yol içindeki tanımlayıcılar (sayısal kimlikler, UUID'ler, belirteçler) varsayılan olarak depolamadan önce gizlenir; öğe `id` ve `class` değerleri ise yazıldığı gibi saklanır, bu yüzden oraya kişisel veri koymayın. Bkz. [privacy.md](docs/privacy.md).
 
 **Tek sayfalık uygulamalarla (SPA) çalışır mı?**
 Evet. Tracker, `popstate` ve `hashchange` olaylarını dinler; böylece History API
@@ -460,10 +466,7 @@ veya bir VPN'in arkasına koyun (bkz. [docs/self-hosting.md](docs/self-hosting.m
 Küçültülmüş paket 5104 bayttır (kesin bütçe: 5120), bağımlılık içermez.
 
 **Verileri nasıl silerim?**
-SQLite dosyası sizindir. Her şeyi silmek için sunucuyu durdurup `radar.db`
-dosyasını (ve `-wal` / `-shm` kardeşlerini) silin ya da saklama için tarihli bir
-`DELETE` çalıştırın — [docs/self-hosting.md](docs/self-hosting.md) içindeki
-saklama SQL'ine bakın.
+Bu sizin SQLite dosyanızdır. Eski verileri otomatik silmek için `RETENTION_DAYS` ayarlayın (varsayılan kapalı; 90 makul bir başlangıçtır). Her şeyi silmek için sunucuyu durdurun ve `radar.db` dosyasını (yanındaki `-wal` / `-shm` dosyalarıyla birlikte) silin. Bkz. [docs/self-hosting.md](docs/self-hosting.md#veri-saklama).
 
 **Üretim için sağlamlaştırma?**
 systemd, HTTPS ters proxy'ler, yedekler, saklama ve çoklu site notları için
@@ -474,7 +477,7 @@ systemd, HTTPS ters proxy'ler, yedekler, saklama ve çoklu site notları için
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
@@ -604,6 +607,10 @@ RageClickRadar 检测四类挫败感。每个阈值都是 [`shared/config.js`](s
 | --- | --- | --- |
 | `PORT` | `8639` | 采集器与仪表盘的 HTTP 端口。 |
 | `DB_PATH` | `./data/radar.db` | SQLite 数据库文件（WAL 模式；会创建父目录）。 |
+| `HOST` | `127.0.0.1` | 绑定的网络接口。默认仅回环地址；设为 `0.0.0.0` 即对外暴露（读取 API 无身份验证）。 |
+| `TRUST_PROXY` | *（空）* | 速率限制时信任其 `X-Forwarded-For` 的反向代理的逗号分隔 IP。 |
+| `RETENTION_DAYS` | *（关闭）* | 启动时及每小时删除早于该天数的事件和会话。留空或为 `0` 则全部保留。参见 [self-hosting.md](docs/self-hosting.md#数据保留)。 |
+| `PATH_REDACTION` | `on` | `off` 原样存储页面路径；否则类似标识符的路径段（数字、UUID、令牌）存储为 `:id`。参见 [privacy.md](docs/privacy.md)。 |
 
 服务器端阈值（`DEFAULT_PORT`、`MAX_BODY_BYTES`、`RATE_LIMIT_PER_MIN`、`SCORE_WEIGHTS`）同样位于 `shared/config.js` 中，但不可由浏览器覆盖。
 
@@ -636,7 +643,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -652,7 +659,7 @@ docs/                   This documentation
 ### 常见问题
 
 **我需要 Cookie 同意吗 / 它对 GDPR 友好吗？**
-RageClickRadar 的设计目标就是避免收集个人数据：无 Cookie、不存储 IP、无指纹识别，仅使用每个标签页的匿名 id。这意在让你远离同意横幅的范畴，但各司法辖区的解读不尽相同，且本文并非法律建议。在做决定之前请阅读 [docs/privacy.md](docs/privacy.md)。
+RageClickRadar 的设计目标就是避免收集个人数据：无 Cookie、不存储 IP、无指纹识别，仅使用每个标签页的匿名 id。这意在让你远离同意横幅的范畴，但各司法辖区的解读不尽相同，且本文并非法律建议。在做决定之前请阅读 [docs/privacy.md](docs/privacy.md)。默认情况下，路径中的标识符（数字 ID、UUID、令牌）在存储前会被脱敏；但元素的 `id` 和 `class` 按原样存储，因此请勿在其中放入个人数据。参见 [privacy.md](docs/privacy.md)。
 
 **它适用于单页应用（SPA）吗？**
 适用。tracker 会监听 `popstate` 和 `hashchange`，因此 History API 和 hash URL 变化都会计为页面反应（路由切换不会被误判为死点击）。信号仅携带 `location.pathname`。
@@ -664,7 +671,7 @@ RageClickRadar 的设计目标就是避免收集个人数据：无 Cookie、不�
 压缩后的包为 5104 字节（硬性预算：5120），且无依赖。
 
 **我该如何删除数据？**
-那个 SQLite 文件是你的。停止服务器并删除 `radar.db`（以及它的 `-wal` / `-shm` 同名文件）即可清空全部数据，或运行带日期的 `DELETE` 进行数据保留管理——参见 [docs/self-hosting.md](docs/self-hosting.md) 中的保留 SQL。
+那个 SQLite 文件是你的。设置 `RETENTION_DAYS` 可自动删除旧数据（默认关闭；90 是合理的起点）。若要清空全部数据，请停止服务器并删除 `radar.db`（以及同名的 `-wal` / `-shm` 文件）。参见 [docs/self-hosting.md](docs/self-hosting.md#数据保留)。
 
 **生产环境加固？**
 有关 systemd、HTTPS 反向代理、备份、数据保留以及多站点说明，请参阅 [docs/self-hosting.md](docs/self-hosting.md)。
@@ -674,7 +681,7 @@ RageClickRadar 的设计目标就是避免收集个人数据：无 Cookie、不�
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
@@ -831,6 +838,10 @@ dead 1 (`SCORE_WEIGHTS`, на стороне сервера).
 | --- | --- | --- |
 | `PORT` | `8639` | HTTP-порт для коллектора и панели. |
 | `DB_PATH` | `./data/radar.db` | Файл базы SQLite (режим WAL; родительский каталог создаётся). |
+| `HOST` | `127.0.0.1` | Интерфейс для привязки. По умолчанию только loopback; `0.0.0.0` открывает доступ (у API чтения нет аутентификации). |
+| `TRUST_PROXY` | *(пусто)* | Через запятую IP обратных прокси, чьему `X-Forwarded-For` доверяется при ограничении частоты. |
+| `RETENTION_DAYS` | *(выкл.)* | Удаляет события и сессии старше указанного числа дней при запуске и затем ежечасно. Пустое значение или `0` означает хранить всё. См. [self-hosting.md](docs/self-hosting.md#хранение-данных). |
+| `PATH_REDACTION` | `on` | `off` сохраняет пути страниц как есть; иначе сегменты, похожие на идентификаторы (числа, UUID, токены), сохраняются как `:id`. См. [privacy.md](docs/privacy.md). |
 
 Серверные пороги (`DEFAULT_PORT`, `MAX_BODY_BYTES`, `RATE_LIMIT_PER_MIN`,
 `SCORE_WEIGHTS`) также находятся в `shared/config.js`, но не переопределяются из
@@ -866,7 +877,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -886,7 +897,7 @@ RageClickRadar спроектирован так, чтобы не собират
 cookie, без хранения IP, без фингерпринтинга, только анонимные идентификаторы на
 вкладку. Это призвано удержать вас вне территории баннеров согласия, но трактовки
 различаются по юрисдикциям, и это не юридическая консультация. Прежде чем решать,
-прочтите [docs/privacy.md](docs/privacy.md).
+прочтите [docs/privacy.md](docs/privacy.md). По умолчанию идентификаторы в путях (числовые id, UUID, токены) заменяются до сохранения; значения `id` и `class` элементов сохраняются как написаны, поэтому не помещайте в них персональные данные. См. [privacy.md](docs/privacy.md).
 
 **Работает ли он с одностраничными приложениями (SPA)?**
 Да. Tracker слушает `popstate` и `hashchange`, поэтому изменения URL через
@@ -902,10 +913,7 @@ History API и hash считаются реакциями страницы (см
 Минифицированный бандл — 5104 байта (жёсткий бюджет: 5120), без зависимостей.
 
 **Как удалить данные?**
-Это ваш файл SQLite. Остановите сервер и удалите `radar.db` (вместе с его
-спутниками `-wal` / `-shm`), чтобы стереть всё, или запустите датированный
-`DELETE` для хранения — см. SQL для ретеншена в
-[docs/self-hosting.md](docs/self-hosting.md).
+Это ваш файл SQLite. Задайте `RETENTION_DAYS`, чтобы автоматически удалять старые данные (по умолчанию выключено; 90 — разумная отправная точка). Чтобы стереть всё, остановите сервер и удалите `radar.db` вместе с файлами `-wal` / `-shm`. См. [docs/self-hosting.md](docs/self-hosting.md#хранение-данных).
 
 **Усиление для продакшена?**
 См. [docs/self-hosting.md](docs/self-hosting.md) о systemd, обратных прокси с
@@ -916,7 +924,7 @@ HTTPS, резервных копиях, ретеншене и заметках �
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
@@ -1045,6 +1053,10 @@ npm install && npm run demo
 | --- | --- | --- |
 | `PORT` | `8639` | منفذ HTTP للمجمِّع ولوحة التحكم. |
 | `DB_PATH` | `./data/radar.db` | ملف قاعدة بيانات SQLite (وضع WAL؛ يُنشأ المجلد الأصل). |
+| `HOST` | `127.0.0.1` | واجهة الربط. الافتراضي loopback فقط؛ اضبط `0.0.0.0` للوصول من الشبكة (واجهة القراءة بلا مصادقة). |
+| `TRUST_PROXY` | *(فارغ)* | عناوين IP مفصولة بفواصل للوكلاء العكسيين الموثوق بترويسة `X-Forwarded-For` الخاصة بهم في تحديد المعدل. |
+| `RETENTION_DAYS` | *(معطّل)* | يحذف الأحداث والجلسات الأقدم من هذا العدد من الأيام عند البدء ثم كل ساعة. القيمة الفارغة أو `0` تُبقي كل شيء. راجع [self-hosting.md](docs/self-hosting.md#الاحتفاظ-بالبيانات). |
+| `PATH_REDACTION` | `on` | `off` يُخزِّن مسارات الصفحات كما هي؛ وإلا فإن المقاطع الشبيهة بالمعرّفات (أرقام، UUID، رموز) تُخزَّن كـ `:id`. راجع [privacy.md](docs/privacy.md). |
 
 توجد عتبات جهة الخادم (`DEFAULT_PORT` و`MAX_BODY_BYTES` و`RATE_LIMIT_PER_MIN` و`SCORE_WEIGHTS`) أيضًا في `shared/config.js` لكنها غير قابلة للتجاوز من المتصفح.
 
@@ -1077,7 +1089,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -1093,7 +1105,7 @@ docs/                   This documentation
 ### الأسئلة الشائعة
 
 **هل أحتاج إلى موافقة على ملفات تعريف الارتباط / وهل هو متوافق مع GDPR؟**
-صُمِّم RageClickRadar لتجنّب جمع البيانات الشخصية: بلا ملفات تعريف ارتباط، وبلا تخزين IP، وبلا بصمات، ومعرّفات مجهولة لكل تبويب فقط. الغرض من ذلك إبقاؤك خارج نطاق أشرطة الموافقة، لكن التفسيرات تتفاوت بين الولايات القضائية، وهذا ليس استشارة قانونية. اقرأ [docs/privacy.md](docs/privacy.md) قبل أن تقرّر.
+صُمِّم RageClickRadar لتجنّب جمع البيانات الشخصية: بلا ملفات تعريف ارتباط، وبلا تخزين IP، وبلا بصمات، ومعرّفات مجهولة لكل تبويب فقط. الغرض من ذلك إبقاؤك خارج نطاق أشرطة الموافقة، لكن التفسيرات تتفاوت بين الولايات القضائية، وهذا ليس استشارة قانونية. اقرأ [docs/privacy.md](docs/privacy.md) قبل أن تقرّر. تُنقَّح المعرّفات الواردة في المسارات (أرقام التعريف والـ UUID والرموز) قبل التخزين افتراضيًا، أما قيم `id` و`class` للعناصر فتُخزَّن كما هي مكتوبة، لذا لا تضع فيها بيانات شخصية. راجع [privacy.md](docs/privacy.md).
 
 **هل يعمل مع تطبيقات الصفحة الواحدة (SPA)؟**
 نعم. يستمع الـ tracker إلى `popstate` و`hashchange`، لذا تُحتسب تغيّرات عناوين History API وhash استجاباتٍ من الصفحة (فلا يُساء تفسير تغيير المسار على أنه نقرة ميتة). ولا تحمل الإشارات سوى `location.pathname`.
@@ -1105,7 +1117,7 @@ docs/                   This documentation
 الحزمة المُصغّرة 5104 بايت (الميزانية الصارمة: 5120)، وبلا اعتماديات.
 
 **كيف أحذف البيانات؟**
-ملف SQLite ملكك. أوقِف الخادم واحذف `radar.db` (مع شقيقيه `-wal` / `-shm`) لمحو كل شيء، أو نفّذ أمر `DELETE` مؤرّخًا للاحتفاظ — راجع SQL الاحتفاظ في [docs/self-hosting.md](docs/self-hosting.md).
+ملف SQLite ملكك. اضبط `RETENTION_DAYS` لحذف البيانات القديمة تلقائيًا (معطّل افتراضيًا؛ و90 بداية معقولة). لمحو كل شيء، أوقِف الخادم واحذف `radar.db` (مع شقيقيه `-wal` / `-shm`). راجع [docs/self-hosting.md](docs/self-hosting.md#الاحتفاظ-بالبيانات).
 
 **التحصين للإنتاج؟**
 راجع [docs/self-hosting.md](docs/self-hosting.md) بشأن systemd، والوكلاء العكسيين عبر HTTPS، والنسخ الاحتياطي، والاحتفاظ، وملاحظات تعدّد المواقع.
@@ -1115,7 +1127,7 @@ docs/                   This documentation
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
@@ -1234,6 +1246,10 @@ RageClickRadar は 4 種類のフラストレーションを検出します。�
 | --- | --- | --- |
 | `PORT` | `8639` | コレクターとダッシュボードの HTTP ポート。 |
 | `DB_PATH` | `./data/radar.db` | SQLite データベースファイル（WAL モード。親ディレクトリは作成される）。 |
+| `HOST` | `127.0.0.1` | バインドするインターフェース。既定はループバックのみ。`0.0.0.0` で公開できます（読み取り API には認証がありません）。 |
+| `TRUST_PROXY` | *（空）* | レート制限で `X-Forwarded-For` を信頼するリバースプロキシの IP（カンマ区切り）。 |
+| `RETENTION_DAYS` | *（無効）* | 起動時と以後 1 時間ごとに、この日数より古いイベントとセッションを削除します。空または `0` の場合はすべて保持します。詳しくは [self-hosting.md](docs/self-hosting.md#データ保持) を参照。 |
+| `PATH_REDACTION` | `on` | `off` はページのパスをそのまま保存します。それ以外では識別子らしいセグメント（数値、UUID、トークン）が `:id` として保存されます。[privacy.md](docs/privacy.md) を参照。 |
 
 サーバー側のしきい値（`DEFAULT_PORT`、`MAX_BODY_BYTES`、`RATE_LIMIT_PER_MIN`、`SCORE_WEIGHTS`）も `shared/config.js` にありますが、ブラウザーからは上書きできません。
 
@@ -1266,7 +1282,7 @@ shared/config.js        Single source of truth for every threshold
 tracker/src/            Browser tracker source (radar, detectors, selector, transport)
 tracker/build.js        esbuild bundle -> tracker/dist/radar.min.js (<5 KB budget)
 server/                 Zero-dependency Node server
-  index.js              Entry: reads PORT / DB_PATH, opens DB, starts HTTP
+  index.js              Entry: reads PORT / HOST / DB_PATH / TRUST_PROXY, opens DB, starts HTTP
   http.js               Routing, CORS, static serving, rate limiting
   collect.js            Payload validation + storage (the field whitelist)
   queries.js            Read/aggregation endpoints
@@ -1282,7 +1298,7 @@ docs/                   This documentation
 ### よくある質問
 
 **Cookie 同意は必要ですか / GDPR に配慮していますか？**
-RageClickRadar は個人データを収集しないよう設計されています。Cookie なし、IP 保存なし、フィンガープリンティングなし、タブごとの匿名 ID のみです。これは同意バナーの領域から外れることを意図していますが、解釈は法域によって異なり、これは法的助言ではありません。判断する前に [docs/privacy.md](docs/privacy.md) をお読みください。
+RageClickRadar は個人データを収集しないよう設計されています。Cookie なし、IP 保存なし、フィンガープリンティングなし、タブごとの匿名 ID のみです。これは同意バナーの領域から外れることを意図していますが、解釈は法域によって異なり、これは法的助言ではありません。判断する前に [docs/privacy.md](docs/privacy.md) をお読みください。既定では、パス内の識別子（数値 ID、UUID、トークン）は保存前に秘匿化されます。ただし要素の `id` と `class` の値は書かれたとおりに保存されるため、そこに個人データを含めないでください。詳しくは [privacy.md](docs/privacy.md) を参照してください。
 
 **シングルページアプリ（SPA）で動作しますか？**
 はい。tracker は `popstate` と `hashchange` をリッスンするため、History API と hash による URL 変更はページの反応として数えられます（ルート変更がデッドクリックと誤認されることはありません）。シグナルが運ぶのは `location.pathname` のみです。
@@ -1294,7 +1310,7 @@ RageClickRadar は個人データを収集しないよう設計されていま�
 圧縮後のバンドルは 5104 バイト（上限予算：5120）で、依存関係はありません。
 
 **データを削除するには？**
-SQLite ファイルはあなたのものです。すべて消去するにはサーバーを停止して `radar.db`（およびその `-wal` / `-shm` 兄弟ファイル）を削除するか、保持のために日付指定の `DELETE` を実行してください——[docs/self-hosting.md](docs/self-hosting.md) の保持用 SQL を参照。
+それはあなたの SQLite ファイルです。`RETENTION_DAYS` を設定すると古いデータを自動で削除します（既定では無効。90 が妥当な出発点です）。すべて消去するには、サーバーを停止して `radar.db`（同名の `-wal` / `-shm` ファイルを含む）を削除してください。詳しくは [docs/self-hosting.md](docs/self-hosting.md#データ保持) を参照してください。
 
 **本番向けの堅牢化は？**
 systemd、HTTPS リバースプロキシ、バックアップ、保持、マルチサイトに関する注意点は [docs/self-hosting.md](docs/self-hosting.md) を参照してください。
@@ -1304,7 +1320,7 @@ systemd、HTTPS リバースプロキシ、バックアップ、保持、マル�
 ```bash
 npm test                       # unit tests (Node built-in runner)
 npm run build:tracker          # rebuild tracker/dist/radar.min.js (enforces <5 KB)
-npm start                      # run the server (PORT, DB_PATH from env)
+npm start                      # run the server (PORT, HOST, DB_PATH, TRUST_PROXY from env)
 npm run seed -- --sessions 40 --seed 42 --url http://localhost:8639 --verify
 npm run test:e2e               # Playwright end-to-end tests
 ```
