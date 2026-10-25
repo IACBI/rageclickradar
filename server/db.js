@@ -9,7 +9,7 @@ try {
 } catch {
   process.stderr.write(
     'RageClickRadar: node:sqlite is not available in this Node runtime.\n' +
-      'You need Node >= 22.5. On Node 22.5 through 23.3 you must also start\n' +
+      'You need Node >= 22.5. On 22.5-22.12 and 23.0-23.3 you must also start\n' +
       'the process with the --experimental-sqlite flag, e.g.:\n' +
       '  node --experimental-sqlite server/index.js\n' +
       'On Node 23.4+ (and 24.x) it is available without any flag.\n',
